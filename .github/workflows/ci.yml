@@ -8,9 +8,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest
+      - name: Install dependencies (from uv.lock)
+        run: uv sync
+      - name: Lint
+        run: uv run ruff check .
+      - name: Test
+        # Network/browser integration tests are opt-in (DOCFORGE_NETWORK_TESTS)
+        # and stay skipped here, so CI needs no headless browser.
+        run: uv run pytest

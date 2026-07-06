@@ -6,9 +6,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "Prabakaran" }]
-dependencies = []  # added deliberately, one per milestone — never a speculative list
+dependencies = [
+    "crawl4ai>=0.9.0",  # M1: crawls docs sites and converts HTML -> clean markdown
+]
 
-[project.optional-dependencies]
+# Dev-only tools (PEP 735). Not published to PyPI; installed by default via `uv sync`.
+[dependency-groups]
 dev = ["pytest", "ruff"]
 
 # Wires the `docforge` command to a main() we write in M3. Declared now so the

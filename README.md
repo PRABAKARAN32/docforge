@@ -22,20 +22,19 @@ crawl (Crawl4AI) → normalized markdown → hash per page → diff vs. last run
 
 ## Install (development)
 
-Requires **Python 3.11+**.
+Requires **Python 3.11+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -e ".[dev]"            # editable install + dev tools (pytest, ruff)
+uv sync                 # creates .venv and installs everything from uv.lock
+uv run crawl4ai-setup   # one-time: installs the headless browser Crawl4AI needs
 ```
 
 Run the checks:
 
 ```bash
-ruff check .
-pytest
+uv run ruff check .
+uv run pytest                               # fast tests only
+DOCFORGE_NETWORK_TESTS=1 uv run pytest      # include live-crawl integration tests
 ```
 
 ## Usage

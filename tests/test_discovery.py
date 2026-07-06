@@ -10,7 +10,13 @@ from urllib.parse import urlparse
 
 import pytest
 
-from docforge.discovery import Fetcher, discover_urls, parse_sitemap
+from docforge.discovery import (
+    Fetcher,
+    LinkFetcher,
+    bfs_discover_urls,
+    discover_urls,
+    parse_sitemap,
+)
 
 _NETWORK = os.getenv("DOCFORGE_NETWORK_TESTS")
 
@@ -89,6 +95,99 @@ def test_discover_deduplicates() -> None:
         "https://d/sm-2.xml": _urlset("https://d/b"),  # b appears twice
     }
     assert discover_urls("https://d/", fetch=make_fetcher(site)) == ["https://d/a", "https://d/b"]
+
+
+# --- BFS discovery (fake link-graph) ---
+
+def make_link_fetcher(graph: dict[str, list[str]]) -> LinkFetcher:
+    def _fetch(url: str) -> list[str]:
+        return graph.get(url, [])
+
+    return _fetch
+
+
+def test_bfs_walks_links_from_the_seed() -> None:
+    graph = {
+        "https://d/": ["https://d/a", "https://d/b"],
+        "https://d/a": ["https://d/c"],
+    }
+    assert bfs_discover_urls("https://d/", fetch_links=make_link_fetcher(graph)) == [
+        "https://d/",
+        "https://d/a",
+        "https://d/b",
+        "https://d/c",
+    ]
+
+
+def test_bfs_terminates_on_cycles() -> None:
+    graph = {"https://d/": ["https://d/a"], "https://d/a": ["https://d/"]}  # A -> B -> A
+    assert bfs_discover_urls("https://d/", fetch_links=make_link_fetcher(graph)) == [
+        "https://d/",
+        "https://d/a",
+    ]
+
+
+def test_bfs_stays_on_host() -> None:
+    graph = {"https://d/": ["https://d/a", "https://evil.com/x"]}
+    assert bfs_discover_urls("https://d/", fetch_links=make_link_fetcher(graph)) == [
+        "https://d/",
+        "https://d/a",
+    ]
+
+
+def test_bfs_respects_max_pages() -> None:
+    graph = {"https://d/": ["https://d/a", "https://d/b", "https://d/c"]}
+    result = bfs_discover_urls("https://d/", fetch_links=make_link_fetcher(graph), max_pages=2)
+    assert len(result) == 2
+
+
+def test_bfs_ignores_fragments() -> None:
+    graph = {"https://d/": ["https://d/a#intro", "https://d/a#setup"]}  # same page, 2 anchors
+    assert bfs_discover_urls("https://d/", fetch_links=make_link_fetcher(graph)) == [
+        "https://d/",
+        "https://d/a",
+    ]
+
+
+def test_bfs_survives_a_failing_page() -> None:
+    def fetch_links(url: str) -> list[str]:
+        if url == "https://d/":
+            return ["https://d/a"]
+        raise RuntimeError("crawl failed")  # a/ errors when we try to read its links
+
+    result = bfs_discover_urls("https://d/", fetch_links=fetch_links)
+    assert result == ["https://d/", "https://d/a"]  # a still discovered; walk didn't crash
+
+
+# --- fallback gating in discover_urls ---
+
+def test_discover_uses_sitemap_and_ignores_bfs_when_sitemap_exists() -> None:
+    site = {"https://d/sitemap.xml": _urlset("https://d/a")}
+    # Even with allow_bfs=True, a present sitemap wins (fetch_links must not be needed).
+    result = discover_urls("https://d/", fetch=make_fetcher(site), allow_bfs=True)
+    assert result == ["https://d/a"]
+
+
+def test_discover_returns_empty_when_no_sitemap_and_bfs_disabled() -> None:
+    graph = {"https://d/": ["https://d/a"]}
+    result = discover_urls(
+        "https://d/",
+        fetch=make_fetcher({}),  # no sitemap
+        allow_bfs=False,  # and BFS not permitted
+        fetch_links=make_link_fetcher(graph),
+    )
+    assert result == []
+
+
+def test_discover_falls_back_to_bfs_when_allowed() -> None:
+    graph = {"https://d/": ["https://d/a", "https://d/b"]}
+    result = discover_urls(
+        "https://d/",
+        fetch=make_fetcher({}),  # no sitemap
+        allow_bfs=True,
+        fetch_links=make_link_fetcher(graph),
+    )
+    assert result == ["https://d/", "https://d/a", "https://d/b"]
 
 
 # --- opt-in: hits a real sitemap over the network ---

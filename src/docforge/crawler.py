@@ -75,3 +75,54 @@ def crawl_urls(
     return asyncio.run(
         crawl_urls_async(urls, respect_robots_txt=respect_robots_txt, user_agent=user_agent)
     )
+
+
+def _internal_hrefs(links: object) -> list[str]:
+    """Pull the 'internal' link hrefs out of a Crawl4AI result's links.
+
+    Robust to the links being either a model (``.internal`` -> objects with ``.href``)
+    or a plain dict (``{"internal": [{"href": ...}]}``).
+    """
+    internal = getattr(links, "internal", None)
+    if internal is None and isinstance(links, dict):
+        internal = links.get("internal", [])
+    hrefs: list[str] = []
+    for item in internal or []:
+        href = getattr(item, "href", None)
+        if href is None and isinstance(item, dict):
+            href = item.get("href")
+        if href:
+            hrefs.append(href)
+    return hrefs
+
+
+async def fetch_page_links_async(
+    url: str,
+    *,
+    respect_robots_txt: bool = True,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> list[str]:
+    """Crawl one page and return the internal (same-doc-site) links it contains.
+
+    Used by BFS discovery to walk a site that has no sitemap. Returns ``[]`` if the
+    page fails to crawl (including robots-blocked), so a bad page doesn't abort the walk.
+    """
+    browser_config = BrowserConfig(user_agent=user_agent)
+    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt)
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        result = await crawler.arun(url=url, config=run_config)
+        if not result.success:
+            return []
+        return _internal_hrefs(result.links)
+
+
+def fetch_page_links(
+    url: str,
+    *,
+    respect_robots_txt: bool = True,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> list[str]:
+    """Synchronous wrapper around :func:`fetch_page_links_async`."""
+    return asyncio.run(
+        fetch_page_links_async(url, respect_robots_txt=respect_robots_txt, user_agent=user_agent)
+    )

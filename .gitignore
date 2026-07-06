@@ -13,6 +13,9 @@ __pycache__/
 # Local, machine-specific Claude Code settings (personal, not shared)
 .claude/settings.local.json
 
+# Personal learning notes — local only, not part of the project
+Notes/
+
 # Local state (DocForge's SQLite manifest is generated, not source)
 *.db
 *.sqlite3

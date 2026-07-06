@@ -1,0 +1,28 @@
+[project]
+name = "docforge"
+version = "0.1.0"
+description = "Keeps a documentation RAG in sync by detecting and updating only what changed."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Prabakaran" }]
+dependencies = []  # added deliberately, one per milestone — never a speculative list
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+# Wires the `docforge` command to a main() we write in M3. Declared now so the
+# packaging shape is stable, but the module doesn't exist yet — that's fine
+# because nothing imports it until the CLI milestone.
+# [project.scripts]
+# docforge = "docforge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

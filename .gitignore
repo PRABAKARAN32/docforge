@@ -1,0 +1,23 @@
+# Python virtual environment — commit the recipe (pyproject.toml), never the installed env
+.venv/
+
+# Bytecode / caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Secrets — NEVER commit these
+.env
+
+# Local, machine-specific Claude Code settings (personal, not shared)
+.claude/settings.local.json
+
+# Local state (DocForge's SQLite manifest is generated, not source)
+*.db
+*.sqlite3
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

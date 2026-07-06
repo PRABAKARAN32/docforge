@@ -15,7 +15,11 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from crawl4ai import AsyncWebCrawler
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+
+# We identify ourselves honestly instead of pretending to be a human browser.
+# Ethical crawling 101: say who you are so site owners can see/contact the bot.
+DEFAULT_USER_AGENT = "DocForge/0.1 (documentation sync bot; +https://github.com/DocForge)"
 
 
 @dataclass(frozen=True)
@@ -31,22 +35,43 @@ class CrawledPage:
     markdown: str
 
 
-async def crawl_urls_async(urls: Sequence[str]) -> list[CrawledPage]:
+async def crawl_urls_async(
+    urls: Sequence[str],
+    *,
+    respect_robots_txt: bool = True,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> list[CrawledPage]:
     """Crawl each URL and return the pages that succeeded.
 
-    Failed pages are skipped rather than raising, so one bad URL doesn't abort the
-    whole run. Callers that need to guard deletions (Decision 5.5: never delete on a
-    partial crawl) should compare the returned URL set against what they expected.
+    Ethical defaults (see Notes/M1 on crawling ethics):
+      * ``respect_robots_txt=True`` — if a site's robots.txt disallows a URL, Crawl4AI
+        reports failure, so that page is simply skipped and never fetched.
+      * an honest ``user_agent`` identifying DocForge, rather than impersonating a human.
+
+    Failed pages (including robots-blocked ones) are skipped rather than raising, so one
+    bad URL doesn't abort the whole run. Callers that need to guard deletions (Decision
+    5.5: never delete on a partial crawl) should compare the returned URL set against
+    what they expected.
     """
+    browser_config = BrowserConfig(user_agent=user_agent)
+    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt)
+
     pages: list[CrawledPage] = []
-    async with AsyncWebCrawler() as crawler:
+    async with AsyncWebCrawler(config=browser_config) as crawler:
         for url in urls:
-            result = await crawler.arun(url=url)
+            result = await crawler.arun(url=url, config=run_config)
             if result.success:
                 pages.append(CrawledPage(url=result.url, markdown=str(result.markdown)))
     return pages
 
 
-def crawl_urls(urls: Sequence[str]) -> list[CrawledPage]:
+def crawl_urls(
+    urls: Sequence[str],
+    *,
+    respect_robots_txt: bool = True,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> list[CrawledPage]:
     """Synchronous convenience wrapper around :func:`crawl_urls_async`."""
-    return asyncio.run(crawl_urls_async(urls))
+    return asyncio.run(
+        crawl_urls_async(urls, respect_robots_txt=respect_robots_txt, user_agent=user_agent)
+    )

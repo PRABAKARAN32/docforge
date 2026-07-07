@@ -67,19 +67,22 @@ class QdrantVectorStore:
         url: str = "http://localhost:6333",
         path: str | None = None,
         api_key: str | None = None,
+        timeout: float = 60.0,
         collection: str = "docforge",
     ) -> None:
         # Three ways to connect, in priority order:
         #   client=...  -> injected (tests use QdrantClient(location=":memory:"))
         #   path=...    -> embedded on-disk Qdrant, in-process, NO server/Docker (like SQLite)
         #   url=...     -> a Qdrant server (Docker, native, or remote/Qdrant Cloud with api_key)
+        # timeout (seconds) applies to server requests -- generous by default so confirmed
+        # writes to a distant/remote cluster don't time out (the client default is ~5s).
         if client is None:
             from qdrant_client import QdrantClient as _QdrantClient
 
             if path is not None:
                 client = _QdrantClient(path=path)
             else:
-                client = _QdrantClient(url=url, api_key=api_key)
+                client = _QdrantClient(url=url, api_key=api_key, timeout=timeout)
         self._client = client
         self._collection = collection
 

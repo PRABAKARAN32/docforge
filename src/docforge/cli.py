@@ -47,17 +47,34 @@ except ImportError:  # pragma: no cover -- fallback keeps help working without t
     _HelpFormatter = argparse.RawDescriptionHelpFormatter
 
 
-def _open_store(qdrant_url: str, qdrant_path: str | None, api_key: str | None = None):
+def _open_store(
+    qdrant_url: str,
+    qdrant_path: str | None,
+    api_key: str | None = None,
+    timeout: float = 60.0,
+):
     """Open the Qdrant store: embedded (--qdrant-path) if given, else the server URL.
 
-    ``api_key`` authenticates to a remote/managed Qdrant (e.g. Qdrant Cloud); ignored in
-    embedded (path) mode.
+    ``api_key`` authenticates to a remote/managed Qdrant (e.g. Qdrant Cloud); ``timeout``
+    (seconds) covers server requests. Both are ignored in embedded (path) mode.
     """
     from docforge.vectorstore import QdrantVectorStore
 
     if qdrant_path is not None:
         return QdrantVectorStore(path=qdrant_path)
-    return QdrantVectorStore(url=qdrant_url, api_key=api_key)
+    return QdrantVectorStore(url=qdrant_url, api_key=api_key, timeout=timeout)
+
+
+def _store_error_hint(qdrant_url: str, qdrant_path: str | None) -> str:
+    """A hint tailored to how the user is connecting (local Docker vs. remote/cloud)."""
+    if qdrant_path is not None:
+        return f"Could not open the embedded vector store at {qdrant_path}."
+    if "localhost" in qdrant_url or "127.0.0.1" in qdrant_url:
+        return f"Is Qdrant running? Start it with: docker compose up -d  (expected at {qdrant_url})"
+    return (
+        f"Could not reach the vector store at {qdrant_url}. Check the URL, that QDRANT_API_KEY "
+        "is set/correct, your network, and try a larger --qdrant-timeout for a distant cluster."
+    )
 
 
 def run_sync(
@@ -70,6 +87,7 @@ def run_sync(
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
     qdrant_api_key: str | None = None,
+    qdrant_timeout: float = 60.0,
     embed_model: str = DEFAULT_MODEL,
     device: str = DEFAULT_DEVICE,
     conditional_mode: str = "auto",
@@ -135,8 +153,8 @@ def run_sync(
             to_embed = len(report.new) + len(report.changed)
             out(f"Embedding {to_embed} changed page(s) into the vector store ...")
             if not _embed_into_store(
-                result, qdrant_url, qdrant_path, qdrant_api_key, embed_model, device,
-                embedder, store, out,
+                result, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
+                embed_model, device, embedder, store, out,
             ):
                 return 1
 
@@ -147,7 +165,8 @@ def run_sync(
 
 
 def _embed_into_store(
-    result, qdrant_url, qdrant_path, qdrant_api_key, embed_model, device, embedder, store, out
+    result, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
+    embed_model, device, embedder, store, out,
 ) -> bool:
     """Embed changes into the vector store; return False (with a helpful message) on error."""
     try:
@@ -157,12 +176,11 @@ def _embed_into_store(
             embedder = FastEmbedEmbedder(embed_model, device=device)
             out(f"  (embedding device: {embedder.device})")
         if store is None:
-            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key)
+            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
         embed_changes(result, embedder, store)
     except Exception as exc:  # noqa: BLE001 -- surface any store/model failure as a clean message
         out(f"Vector store error: {exc}")
-        if qdrant_path is None:
-            out(f"Is Qdrant running? Start it with: docker compose up -d  (expected at {qdrant_url})")
+        out(_store_error_hint(qdrant_url, qdrant_path))
         return False
     return True
 
@@ -236,6 +254,7 @@ def run_search(
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
     qdrant_api_key: str | None = None,
+    qdrant_timeout: float = 60.0,
     embed_model: str = DEFAULT_MODEL,
     device: str = DEFAULT_DEVICE,
     limit: int = 5,
@@ -250,12 +269,12 @@ def run_search(
 
             embedder = FastEmbedEmbedder(embed_model, device=device)
         if store is None:
-            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key)
+            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
         vector = embedder.embed([query])[0]
         hits = store.search(vector, limit=limit)
     except Exception as exc:  # noqa: BLE001 -- clean message instead of a traceback
         out(f"Search failed: {exc}")
-        out("Has anything been synced yet, and is the vector store reachable?")
+        out(_store_error_hint(qdrant_url, qdrant_path))
         return 1
 
     if not hits:
@@ -275,6 +294,7 @@ def run_remove(
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
     qdrant_api_key: str | None = None,
+    qdrant_timeout: float = 60.0,
     store: VectorStore | None = None,
     out=print,
 ) -> int:
@@ -290,12 +310,12 @@ def run_remove(
 
         try:
             if store is None:
-                store = _open_store(qdrant_url, qdrant_path, qdrant_api_key)
+                store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
             for url in matching:
                 store.delete_by_source_url(url)
         except Exception as exc:  # noqa: BLE001 -- vector store may be down; report cleanly
             out(f"Vector store error: {exc}")
-            out("Nothing was removed. Is the vector store reachable?")
+            out(_store_error_hint(qdrant_url, qdrant_path))
             return 1
 
         for url in matching:
@@ -386,6 +406,11 @@ def _add_vector_store_flags(sub: argparse.ArgumentParser) -> None:
         "--qdrant-api-key", default=None, metavar="KEY",
         help="API key for a remote/managed Qdrant (e.g. Qdrant Cloud). Prefer the "
         "QDRANT_API_KEY environment variable to keep the key out of shell history.",
+    )
+    group.add_argument(
+        "--qdrant-timeout", type=float, default=60.0, metavar="SECONDS",
+        help="Timeout for vector-store requests, in seconds (default: 60). Raise it for a "
+        "slow or distant/remote cluster.",
     )
 
 
@@ -498,6 +523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # API key: the --qdrant-api-key flag overrides the QDRANT_API_KEY env var (the secure default).
     api_key = getattr(args, "qdrant_api_key", None) or os.getenv("QDRANT_API_KEY")
+    timeout = getattr(args, "qdrant_timeout", 60.0)
 
     if args.command == "sync":
         return run_sync(
@@ -509,6 +535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
             qdrant_api_key=api_key,
+            qdrant_timeout=timeout,
             embed_model=args.embed_model,
             device=args.device,
             conditional_mode=args.conditional,
@@ -533,6 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
             qdrant_api_key=api_key,
+            qdrant_timeout=timeout,
             embed_model=args.embed_model,
             device=args.device,
             limit=args.limit,
@@ -544,6 +572,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
             qdrant_api_key=api_key,
+            qdrant_timeout=timeout,
         )
     return 1
 

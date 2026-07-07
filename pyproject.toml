@@ -10,6 +10,7 @@ dependencies = [
     "crawl4ai>=0.9.0",  # M1: crawls docs sites and converts HTML -> clean markdown
     "fastembed>=0.3",   # M2: lightweight local embeddings (ONNX, no torch)
     "qdrant-client>=1.7",  # M2: client for the Qdrant vector store
+    "rich-argparse>=1.5",  # colorful --help (rich is already a transitive dep)
 ]
 
 # Dev-only tools (PEP 735). Not published to PyPI; installed by default via `uv sync`.

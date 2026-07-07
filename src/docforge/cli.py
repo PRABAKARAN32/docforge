@@ -32,6 +32,19 @@ from docforge.vectorstore import VectorStore
 # (resolve from the --conditional/--force flags).
 _UNSET = object()
 
+# Colorful help via rich-argparse, with a plain fallback if it isn't installed. It preserves
+# the raw examples epilog and auto-disables color when output isn't a terminal (pipes/CI).
+try:
+    from rich_argparse import RawDescriptionRichHelpFormatter as _HelpFormatter
+
+    _HelpFormatter.styles["argparse.prog"] = "bold cyan"
+    _HelpFormatter.styles["argparse.groups"] = "bold magenta"
+    _HelpFormatter.styles["argparse.args"] = "cyan"
+    _HelpFormatter.styles["argparse.metavar"] = "dim cyan"
+    _HelpFormatter.styles["argparse.help"] = "default"
+except ImportError:  # pragma: no cover -- fallback keeps help working without the dep
+    _HelpFormatter = argparse.RawDescriptionHelpFormatter
+
 
 def run_sync(
     seed_url: str,
@@ -181,6 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="docforge",
         description="DocForge keeps a documentation knowledge base fresh: it detects exactly which "
         "pages changed and embeds only those into a vector store.",
+        formatter_class=_HelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"docforge {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
@@ -192,7 +206,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "changed since the last run, and embed only the new/changed pages into the vector store "
         "(deleting stale chunks first). Re-running with no changes does nothing.",
         epilog=_SYNC_EXAMPLES,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_HelpFormatter,
     )
     sync.add_argument("url", help="The documentation site URL to sync.")
 

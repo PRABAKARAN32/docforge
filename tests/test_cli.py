@@ -8,7 +8,8 @@ from collections.abc import Sequence
 
 import pytest
 
-from docforge.cli import _build_parser, run_sync
+from docforge.chunking import Chunk
+from docforge.cli import _build_parser, run_diff, run_remove, run_search, run_status, run_sync
 from docforge.crawler import CrawledPage
 from docforge.manifest import Manifest
 from docforge.vectorstore import QdrantVectorStore
@@ -140,6 +141,94 @@ def test_parser_accepts_conditional_and_force() -> None:
     assert args.force is True
     # defaults
     assert _build_parser().parse_args(["sync", "https://d/"]).conditional == "auto"
+
+
+def test_parser_supports_all_subcommands() -> None:
+    parser = _build_parser()
+    assert parser.parse_args(["diff", "https://d/"]).command == "diff"
+    assert parser.parse_args(["status"]).command == "status"
+    assert parser.parse_args(["search", "hello"]).command == "search"
+    assert parser.parse_args(["remove", "d.com"]).command == "remove"
+
+
+# --- status ---
+
+def test_status_reports_pages_per_site(tmp_path) -> None:
+    db = str(tmp_path / "d.db")
+    with Manifest(db) as m:
+        m.upsert_page("https://a.com/x", "h1")
+        m.upsert_page("https://a.com/y", "h2")
+        m.upsert_page("https://b.com/z", "h3")
+    lines: list[str] = []
+
+    assert run_status(db_path=db, out=lines.append) == 0
+    assert any("3 pages tracked" in line for line in lines)
+    assert any("a.com" in line for line in lines)
+    assert any("b.com" in line for line in lines)
+
+
+def test_status_empty_db(tmp_path) -> None:
+    lines: list[str] = []
+    assert run_status(db_path=str(tmp_path / "empty.db"), out=lines.append) == 0
+    assert any("No pages tracked" in line for line in lines)
+
+
+# --- diff ---
+
+def test_diff_lists_changes_and_writes_nothing(tmp_path) -> None:
+    db = str(tmp_path / "d.db")
+    site = {"https://d/a": "A", "https://d/b": "B"}
+    lines: list[str] = []
+
+    code = run_diff(
+        "https://d/",
+        db_path=db,
+        discover=fake_discover(list(site)),
+        crawl=fake_crawl(site),
+        conditional=None,
+        out=lines.append,
+    )
+
+    assert code == 0
+    assert any("Would change: 2 new" in line for line in lines)
+    assert any("+ new" in line and "https://d/a" in line for line in lines)
+    with Manifest(db) as m:
+        assert m.hashes() == {}  # diff never writes
+
+
+# --- search ---
+
+def test_search_prints_hits() -> None:
+    store = memory_store()
+    store.ensure_collection(4)
+    store.upsert_chunks([Chunk("https://d/a", 0, "install with pip")], [[1.0, 0.0, 0.0, 0.0]])
+    lines: list[str] = []
+
+    code = run_search("how to install", embedder=FakeEmbedder(), store=store, out=lines.append)
+
+    assert code == 0
+    assert any("https://d/a" in line for line in lines)
+
+
+# --- remove ---
+
+def test_remove_deletes_from_manifest_and_store(tmp_path) -> None:
+    db = str(tmp_path / "d.db")
+    store = memory_store()
+    store.ensure_collection(4)
+    with Manifest(db) as m:
+        m.upsert_page("https://a.com/x", "h1")
+        m.upsert_page("https://b.com/y", "h2")
+    store.upsert_chunks([Chunk("https://a.com/x", 0, "t")], [[1.0, 0.0, 0.0, 0.0]])
+    lines: list[str] = []
+
+    code = run_remove("a.com", db_path=db, store=store, out=lines.append)
+
+    assert code == 0
+    with Manifest(db) as m:
+        assert set(m.hashes()) == {"https://b.com/y"}  # a.com removed, b.com kept
+    assert store.count() == 0  # a.com's chunk removed
+    assert any("Removed 1 page" in line for line in lines)
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

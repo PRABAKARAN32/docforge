@@ -69,6 +69,17 @@ docforge sync <url> --force                       # ignore ETag/304, re-crawl ev
 On re-syncs of sites that send `ETag`/`Last-Modified`, DocForge uses HTTP conditional requests to
 **skip re-crawling unchanged pages entirely** (a tiny request instead of a full browser render).
 
+### Other commands
+
+```bash
+docforge diff <url>                 # preview what would change (write nothing)
+docforge status                     # show what's tracked, per site
+docforge search "<query>"           # search the knowledge base
+docforge remove <host>              # drop a site (manifest + vectors)
+```
+
+Run `docforge --help` (or `docforge <command> --help`) for all options.
+
 Run it once to build the knowledge base; run it again later and **only the pages that actually
 changed** get re-crawled-and-re-embedded — unchanged pages are skipped, and a run with no changes
 does nothing. Vectors are stored in Qdrant; page hashes in a local SQLite manifest.

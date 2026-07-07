@@ -14,6 +14,7 @@ touching the rest of DocForge (Decision 5.2). The default implementation is Qdra
 from __future__ import annotations
 
 import uuid
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -64,12 +65,17 @@ class QdrantVectorStore:
         *,
         client: QdrantClient | None = None,
         url: str = "http://localhost:6333",
+        path: str | None = None,
         collection: str = "docforge",
     ) -> None:
+        # Three ways to connect, in priority order:
+        #   client=...  -> injected (tests use QdrantClient(location=":memory:"))
+        #   path=...    -> embedded on-disk Qdrant, in-process, NO server/Docker (like SQLite)
+        #   url=...     -> a Qdrant server (our Docker container, a native install, or remote)
         if client is None:
             from qdrant_client import QdrantClient as _QdrantClient
 
-            client = _QdrantClient(url=url)
+            client = _QdrantClient(path=path) if path is not None else _QdrantClient(url=url)
         self._client = client
         self._collection = collection
 
@@ -83,12 +89,15 @@ class QdrantVectorStore:
                     size=dimension, distance=models.Distance.COSINE
                 ),
             )
-            # Index source_url so delete/filter by page is fast.
-            self._client.create_payload_index(
-                self._collection,
-                field_name="source_url",
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
+            # Index source_url so delete/filter by page is fast. In embedded (local) mode this
+            # is a harmless no-op that emits a warning -- suppress just that noise.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self._client.create_payload_index(
+                    self._collection,
+                    field_name="source_url",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
 
     def upsert_chunks(
         self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]
@@ -128,6 +137,10 @@ class QdrantVectorStore:
 
     def count(self) -> int:
         return self._client.count(self._collection, exact=True).count
+
+    def close(self) -> None:
+        """Release the client. Matters in embedded (path) mode, which locks its folder."""
+        self._client.close()
 
     def search(self, vector: Sequence[float], *, limit: int = 5) -> list[SearchHit]:
         response = self._client.query_points(

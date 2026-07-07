@@ -21,7 +21,7 @@ from docforge.crawler import CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
 from docforge.discovery import discover_urls
-from docforge.embedder import Embedder
+from docforge.embedder import DEFAULT_MODEL, Embedder
 from docforge.manifest import Manifest
 from docforge.rag import embed_changes
 from docforge.vectorstore import VectorStore
@@ -35,6 +35,8 @@ def run_sync(
     max_pages: int | None = None,
     dry_run: bool = False,
     qdrant_url: str = "http://localhost:6333",
+    qdrant_path: str | None = None,
+    embed_model: str = DEFAULT_MODEL,
     discover=discover_urls,
     crawl: Crawler = crawl_urls,
     embedder: Embedder | None = None,
@@ -78,7 +80,9 @@ def run_sync(
         if needs_store:
             to_embed = len(report.new) + len(report.changed)
             out(f"Embedding {to_embed} changed page(s) into the vector store ...")
-            if not _embed_into_store(result, qdrant_url, embedder, store, out):
+            if not _embed_into_store(
+                result, qdrant_url, qdrant_path, embed_model, embedder, store, out
+            ):
                 return 1
 
         apply_changes(manifest, result)
@@ -87,21 +91,29 @@ def run_sync(
     return 0
 
 
-def _embed_into_store(result, qdrant_url, embedder, store, out) -> bool:
+def _embed_into_store(
+    result, qdrant_url, qdrant_path, embed_model, embedder, store, out
+) -> bool:
     """Embed changes into the vector store; return False (with a helpful message) on error."""
     try:
         if embedder is None:
             from docforge.embedder import FastEmbedEmbedder
 
-            embedder = FastEmbedEmbedder()
+            embedder = FastEmbedEmbedder(embed_model)
         if store is None:
             from docforge.vectorstore import QdrantVectorStore
 
-            store = QdrantVectorStore(url=qdrant_url)
+            # An explicit --qdrant-path means embedded (no-Docker) mode; else a server URL.
+            store = (
+                QdrantVectorStore(path=qdrant_path)
+                if qdrant_path is not None
+                else QdrantVectorStore(url=qdrant_url)
+            )
         embed_changes(result, embedder, store)
     except Exception as exc:  # noqa: BLE001 -- surface any store/model failure as a clean message
         out(f"Vector store error: {exc}")
-        out(f"Is Qdrant running? Start it with: docker compose up -d  (expected at {qdrant_url})")
+        if qdrant_path is None:
+            out(f"Is Qdrant running? Start it with: docker compose up -d  (expected at {qdrant_url})")
         return False
     return True
 
@@ -155,7 +167,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--qdrant-url",
         default="http://localhost:6333",
         metavar="URL",
-        help="Qdrant vector-store URL (default: http://localhost:6333).",
+        help="Qdrant server URL: our Docker container, a native install, or remote "
+        "(default: http://localhost:6333).",
+    )
+    sync.add_argument(
+        "--qdrant-path",
+        default=None,
+        metavar="DIR",
+        help="Run Qdrant embedded (no Docker/server), storing vectors in this local folder. "
+        "Takes precedence over --qdrant-url.",
+    )
+    sync.add_argument(
+        "--embed-model",
+        default=DEFAULT_MODEL,
+        metavar="NAME",
+        help=f"fastembed model name for embeddings (default: {DEFAULT_MODEL}).",
     )
     return parser
 
@@ -171,6 +197,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pages=args.max_pages,
             dry_run=args.dry_run,
             qdrant_url=args.qdrant_url,
+            qdrant_path=args.qdrant_path,
+            embed_model=args.embed_model,
             crawl=_progress_crawl,
         )
     return 1

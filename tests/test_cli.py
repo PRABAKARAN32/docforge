@@ -6,7 +6,7 @@ tiny fake, so the full sync path runs with no Docker and no model download.
 
 from collections.abc import Sequence
 
-from docforge.cli import run_sync
+from docforge.cli import _build_parser, run_sync
 from docforge.crawler import CrawledPage
 from docforge.manifest import Manifest
 from docforge.vectorstore import QdrantVectorStore
@@ -104,6 +104,15 @@ def test_no_sitemap_without_bfs_warns_and_exits() -> None:
     assert code == 1
     assert any("No sitemap found" in line for line in lines)
     assert any("--bfs" in line for line in lines)
+
+
+def test_parser_accepts_qdrant_path_and_embed_model() -> None:
+    args = _build_parser().parse_args(
+        ["sync", "https://d/", "--qdrant-path", "./vec", "--embed-model", "BAAI/bge-base-en-v1.5"]
+    )
+    assert args.qdrant_path == "./vec"
+    assert args.embed_model == "BAAI/bge-base-en-v1.5"
+    assert args.qdrant_url == "http://localhost:6333"  # default still present
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

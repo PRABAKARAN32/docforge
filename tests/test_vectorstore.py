@@ -66,3 +66,18 @@ def test_search_returns_payload(store: QdrantVectorStore) -> None:
     assert len(hits) == 1
     assert hits[0].source_url == "https://d/a"
     assert "chunk 0" in hits[0].text
+
+
+def test_embedded_path_mode_persists_to_disk(tmp_path) -> None:
+    # No Docker, no server: Qdrant embedded on disk (like SQLite). Data must survive reopen.
+    path = str(tmp_path / "vectors")
+
+    first = QdrantVectorStore(path=path, collection="test")
+    first.ensure_collection(DIM)
+    first.upsert_chunks(_chunks("https://d/a", 2), _vecs(2))
+    assert first.count() == 2
+    first.close()  # release the folder lock
+
+    reopened = QdrantVectorStore(path=path, collection="test")
+    assert reopened.count() == 2  # persisted on disk across separate clients
+    reopened.close()

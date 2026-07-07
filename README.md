@@ -39,19 +39,28 @@ DOCFORGE_NETWORK_TESTS=1 uv run pytest      # include live-crawl integration tes
 
 ## Usage
 
-Start the vector database (Qdrant) once — it runs in Docker and persists to a named volume:
+**The vector database (Qdrant) can run two ways** — pick one:
 
 ```bash
+# A) Server mode: run Qdrant in Docker (persists to a named volume)
 docker compose up -d
+docforge sync https://docs.example.com/
+
+# B) Embedded mode: no Docker — Qdrant runs in-process, vectors in a local folder
+docforge sync https://docs.example.com/ --qdrant-path ./docforge_vectors
 ```
 
-Then sync a documentation site into the knowledge base:
+(You can also point `--qdrant-url` at any Qdrant server you run yourself — native install or
+remote. Embedded mode is simplest for personal use; server mode scales better for very large
+sites.)
+
+More options:
 
 ```bash
-docforge sync https://docs.example.com/         # sitemap-based discovery
-docforge sync https://nginx.org/en/docs/ --bfs  # no sitemap? crawl page-by-page
-docforge sync <url> --dry-run                    # preview changes, write nothing
-docforge sync <url> --max-pages 100              # cap pages processed
+docforge sync https://nginx.org/en/docs/ --bfs   # no sitemap? crawl page-by-page
+docforge sync <url> --dry-run                     # preview changes, write nothing
+docforge sync <url> --max-pages 100               # cap pages processed
+docforge sync <url> --embed-model BAAI/bge-base-en-v1.5   # a larger embedding model
 ```
 
 Run it once to build the knowledge base; run it again later and **only the pages that actually

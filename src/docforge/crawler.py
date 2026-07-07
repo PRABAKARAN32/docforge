@@ -30,6 +30,10 @@ DEFAULT_USER_AGENT = "DocForge/0.1 (documentation sync bot; +https://github.com/
 # Modest default so we're fast but polite -- a handful of pages in flight, not hundreds.
 DEFAULT_CONCURRENCY = 5
 
+# Per-domain delay range (seconds) between requests. The rate limiter gates by *domain*, so on a
+# single big docs site this is the real throughput ceiling -- kept modest but polite.
+DEFAULT_BASE_DELAY = (0.5, 1.5)
+
 # Called after each page is attempted, as on_page(done, total, url) -> so a caller (the CLI)
 # can show live progress. Kept as an injected callback so the crawler stays UI-agnostic.
 ProgressCallback = Callable[[int, int, str], None]
@@ -54,9 +58,15 @@ async def crawl_urls_async(
     respect_robots_txt: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
     concurrency: int = DEFAULT_CONCURRENCY,
+    base_delay: tuple[float, float] = DEFAULT_BASE_DELAY,
+    rate_limit: bool = True,
     on_page: ProgressCallback | None = None,
 ) -> list[CrawledPage]:
     """Crawl the URLs concurrently and return the pages that succeeded.
+
+    ``base_delay`` is the (min, max) seconds between requests to the SAME domain (the real
+    throughput ceiling on a single big docs site). ``rate_limit=False`` removes the delay
+    entirely -- fastest, least polite.
 
     Uses Crawl4AI's ``arun_many`` with a ``MemoryAdaptiveDispatcher`` (caps concurrency by
     RAM so many browser tabs can't OOM the machine) and a ``RateLimiter`` (polite delays +
@@ -74,15 +84,20 @@ async def crawl_urls_async(
     """
     browser_config = BrowserConfig(user_agent=user_agent, verbose=False)
     run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt, verbose=False, stream=True)
-    dispatcher = MemoryAdaptiveDispatcher(
-        memory_threshold_percent=70.0,
-        max_session_permit=concurrency,
-        rate_limiter=RateLimiter(
-            base_delay=(1.0, 2.0),          # polite random pause between requests
+    rate_limiter = (
+        RateLimiter(
+            base_delay=base_delay,          # polite random pause between same-domain requests
             max_delay=30.0,                 # backoff ceiling
             max_retries=3,
             rate_limit_codes=[429, 503],    # slow down when the server pushes back
-        ),
+        )
+        if rate_limit
+        else None
+    )
+    dispatcher = MemoryAdaptiveDispatcher(
+        memory_threshold_percent=70.0,
+        max_session_permit=concurrency,
+        rate_limiter=rate_limiter,
     )
 
     total = len(urls)
@@ -106,6 +121,8 @@ def crawl_urls(
     respect_robots_txt: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
     concurrency: int = DEFAULT_CONCURRENCY,
+    base_delay: tuple[float, float] = DEFAULT_BASE_DELAY,
+    rate_limit: bool = True,
     on_page: ProgressCallback | None = None,
 ) -> list[CrawledPage]:
     """Synchronous convenience wrapper around :func:`crawl_urls_async`."""
@@ -115,6 +132,8 @@ def crawl_urls(
             respect_robots_txt=respect_robots_txt,
             user_agent=user_agent,
             concurrency=concurrency,
+            base_delay=base_delay,
+            rate_limit=rate_limit,
             on_page=on_page,
         )
     )

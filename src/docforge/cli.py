@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 from docforge import __version__
 from docforge.conditional import http_conditional_get
-from docforge.crawler import DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
+from docforge.crawler import DEFAULT_BASE_DELAY, DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
 from docforge.discovery import discover_urls
@@ -325,8 +325,12 @@ def run_remove(
     return 0
 
 
-def _make_progress_crawl(concurrency: int) -> Crawler:
-    """Build a real crawler (at the given concurrency) wrapped with a live progress line."""
+def _make_progress_crawl(
+    concurrency: int,
+    base_delay: tuple[float, float] = DEFAULT_BASE_DELAY,
+    rate_limit: bool = True,
+) -> Crawler:
+    """Build a real crawler (concurrency + rate-limit settings) with a live progress line."""
 
     def _crawl(urls: Sequence[str]) -> list[CrawledPage]:
         total = len(urls)
@@ -334,7 +338,13 @@ def _make_progress_crawl(concurrency: int) -> Crawler:
         def on_page(done: int, _total: int, _url: str) -> None:
             print(f"\rCrawling {done}/{total} ...", end="", flush=True)
 
-        pages = crawl_urls(urls, concurrency=concurrency, on_page=on_page)
+        pages = crawl_urls(
+            urls,
+            concurrency=concurrency,
+            base_delay=base_delay,
+            rate_limit=rate_limit,
+            on_page=on_page,
+        )
         if total:
             print()  # end the progress line with a newline
         return pages
@@ -370,6 +380,16 @@ def _add_crawling_flags(sub: argparse.ArgumentParser) -> None:
         "--concurrency", type=int, default=DEFAULT_CONCURRENCY, metavar="N",
         help=f"Pages to crawl in parallel (default: {DEFAULT_CONCURRENCY}). "
         "Higher is faster but heavier on the target server.",
+    )
+    group.add_argument(
+        "--crawl-delay", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+        help="Random delay range (seconds) between requests to the SAME site "
+        f"(default: {DEFAULT_BASE_DELAY[0]} {DEFAULT_BASE_DELAY[1]}). Lower it to speed up a "
+        "big single-domain crawl; this is the main throughput knob.",
+    )
+    group.add_argument(
+        "--no-rate-limit", action="store_true",
+        help="Remove the per-site delay entirely (fastest, least polite; may trigger 429s).",
     )
 
 
@@ -525,6 +545,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     api_key = getattr(args, "qdrant_api_key", None) or os.getenv("QDRANT_API_KEY")
     timeout = getattr(args, "qdrant_timeout", 60.0)
 
+    if args.command in ("sync", "diff"):
+        base_delay = tuple(args.crawl_delay) if args.crawl_delay else DEFAULT_BASE_DELAY
+        crawl = _make_progress_crawl(args.concurrency, base_delay, not args.no_rate_limit)
+
     if args.command == "sync":
         return run_sync(
             args.url,
@@ -540,7 +564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             device=args.device,
             conditional_mode=args.conditional,
             force=args.force,
-            crawl=_make_progress_crawl(args.concurrency),
+            crawl=crawl,
         )
     if args.command == "diff":
         return run_diff(
@@ -550,7 +574,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pages=args.max_pages,
             conditional_mode=args.conditional,
             force=args.force,
-            crawl=_make_progress_crawl(args.concurrency),
+            crawl=crawl,
         )
     if args.command == "status":
         return run_status(db_path=args.db)

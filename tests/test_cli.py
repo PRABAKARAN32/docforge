@@ -143,6 +143,18 @@ def test_parser_accepts_conditional_and_force() -> None:
     assert _build_parser().parse_args(["sync", "https://d/"]).conditional == "auto"
 
 
+def test_parser_accepts_crawl_delay_and_no_rate_limit() -> None:
+    args = _build_parser().parse_args(
+        ["sync", "https://d/", "--crawl-delay", "0.2", "0.6", "--no-rate-limit"]
+    )
+    assert args.crawl_delay == [0.2, 0.6]
+    assert args.no_rate_limit is True
+    # defaults
+    plain = _build_parser().parse_args(["sync", "https://d/"])
+    assert plain.crawl_delay is None
+    assert plain.no_rate_limit is False
+
+
 def test_parser_accepts_qdrant_api_key() -> None:
     args = _build_parser().parse_args(["sync", "https://d/", "--qdrant-api-key", "secret"])
     assert args.qdrant_api_key == "secret"

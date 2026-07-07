@@ -20,8 +20,9 @@ own small type rather than a Crawl4AI object.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from docforge.conditional import ConditionalFetcher
 from docforge.crawler import CrawledPage, crawl_urls
 from docforge.diff import DiffReport, deletions_to_apply, diff_hashes
 from docforge.hashing import content_hash
@@ -30,6 +31,8 @@ from docforge.manifest import Manifest
 # A crawler is anything that takes URLs and returns crawled pages. The real one is
 # crawl_urls; tests pass a fake. Typing it this way is what makes injection explicit.
 Crawler = Callable[[Sequence[str]], list[CrawledPage]]
+
+Validators = dict[str, tuple[str | None, str | None]]  # url -> (etag, last_modified)
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,45 @@ class ChangeDetectionResult:
     # url -> markdown for the pages crawled this run. The RAG sync (M2) needs the content
     # of new/changed pages to chunk + embed them; unchanged pages' markdown is unused.
     pages: dict[str, str]
+    # Fresh HTTP validators captured this run (for changed/new pages), to store for next time.
+    new_validators: Validators = field(default_factory=dict)
+    # None if the 304 pre-check was off; else whether the site sent any validators at all.
+    conditional_supported: bool | None = None
+
+
+def _preselect(
+    urls: Sequence[str],
+    previous_hashes: dict[str, str],
+    validators: Validators,
+    conditional: ConditionalFetcher | None,
+) -> tuple[list[str], dict[str, str], Validators, bool]:
+    """Split URLs into those to crawl vs. those the server confirmed unchanged (304).
+
+    When ``conditional`` is None the pre-check is off -> crawl everything (today's behavior).
+    Otherwise, ask the server about each URL: a 304 (for a page we already know) is skipped
+    and keeps its stored hash; anything else is crawled, and any fresh validators are kept.
+    """
+    if conditional is None:
+        return list(urls), {}, {}, False
+
+    to_crawl: list[str] = []
+    unchanged_304: dict[str, str] = {}
+    new_validators: Validators = {}
+    any_validators = False
+
+    for url in urls:
+        etag, last_modified = validators.get(url, (None, None))
+        response = conditional(url, etag, last_modified)
+        any_validators = any_validators or response.has_validators
+
+        if response.not_modified and url in previous_hashes:
+            unchanged_304[url] = previous_hashes[url]
+        else:
+            to_crawl.append(url)
+            if response.has_validators:
+                new_validators[url] = (response.etag, response.last_modified)
+
+    return to_crawl, unchanged_304, new_validators, any_validators
 
 
 def detect_changes(
@@ -49,40 +91,55 @@ def detect_changes(
     manifest: Manifest,
     *,
     crawl: Crawler = crawl_urls,
+    conditional: ConditionalFetcher | None = None,
 ) -> ChangeDetectionResult:
     """Crawl ``urls``, fingerprint them, and diff against the manifest. No mutation.
 
-    ``crawl_succeeded`` is True only if every requested URL came back as a page. A
-    shortfall means some pages failed to crawl, so downstream deletion is suppressed
-    (Decision 5.5) -- we never treat a failed fetch as "the page was deleted." (This is
-    a conservative signal; site discovery in a later milestone can refine it.)
+    If ``conditional`` is given, a cheap HTTP pre-check first skips pages the server reports
+    as unchanged (304), so only new/changed pages are browser-crawled.
+
+    ``crawl_succeeded`` is True only if every URL we *tried to crawl* came back. A shortfall
+    means some pages failed, so downstream deletion is suppressed (Decision 5.5) -- we never
+    treat a failed fetch as "the page was deleted." 304-skipped pages count as present.
     """
-    pages = crawl(urls)
-    markdown_by_url = {page.url: page.markdown for page in pages}
-    current_hashes = {url: content_hash(md) for url, md in markdown_by_url.items()}
     previous_hashes = manifest.hashes()
+    stored_validators = manifest.validators()
+
+    to_crawl, unchanged_304, new_validators, any_validators = _preselect(
+        urls, previous_hashes, stored_validators, conditional
+    )
+
+    pages = crawl(to_crawl)
+    markdown_by_url = {page.url: page.markdown for page in pages}
+    crawled_hashes = {url: content_hash(md) for url, md in markdown_by_url.items()}
+    current_hashes = {**unchanged_304, **crawled_hashes}
 
     report = diff_hashes(previous_hashes, current_hashes)
-    crawl_succeeded = len(pages) == len(urls)
+    crawl_succeeded = len(pages) == len(to_crawl)
 
     return ChangeDetectionResult(
         report=report,
         current_hashes=current_hashes,
         crawl_succeeded=crawl_succeeded,
         pages=markdown_by_url,
+        new_validators=new_validators,
+        conditional_supported=None if conditional is None else any_validators,
     )
 
 
 def apply_changes(manifest: Manifest, result: ChangeDetectionResult) -> None:
     """Persist a detection result into the manifest.
 
-    Upserts the hash of every new/changed page, and removes deleted pages -- but only
-    the deletions that are safe to apply given whether the crawl fully succeeded.
-    Unchanged pages are left untouched, so a no-change run writes nothing (idempotency,
-    Decision 5.6).
+    Upserts the hash of every new/changed page (with any fresh HTTP validators), and removes
+    deleted pages -- but only the deletions that are safe to apply given whether the crawl
+    fully succeeded. Unchanged pages are left untouched, so a no-change run writes nothing
+    (idempotency, Decision 5.6).
     """
     for url in result.report.new | result.report.changed:
-        manifest.upsert_page(url, result.current_hashes[url])
+        etag, last_modified = result.new_validators.get(url, (None, None))
+        manifest.upsert_page(
+            url, result.current_hashes[url], etag=etag, last_modified=last_modified
+        )
 
     for url in deletions_to_apply(result.report, crawl_succeeded=result.crawl_succeeded):
         manifest.delete_page(url)

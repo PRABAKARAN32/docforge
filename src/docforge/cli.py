@@ -17,6 +17,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
+from docforge.conditional import http_conditional_get
 from docforge.crawler import DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
@@ -25,6 +26,10 @@ from docforge.embedder import DEFAULT_DEVICE, DEFAULT_MODEL, Embedder
 from docforge.manifest import Manifest
 from docforge.rag import embed_changes
 from docforge.vectorstore import VectorStore
+
+# Sentinel so callers/tests can pass conditional=None explicitly (disable) vs. not passing it
+# (resolve from the --conditional/--force flags).
+_UNSET = object()
 
 
 def run_sync(
@@ -38,8 +43,11 @@ def run_sync(
     qdrant_path: str | None = None,
     embed_model: str = DEFAULT_MODEL,
     device: str = DEFAULT_DEVICE,
+    conditional_mode: str = "auto",
+    force: bool = False,
     discover=discover_urls,
     crawl: Crawler = crawl_urls,
+    conditional=_UNSET,
     embedder: Embedder | None = None,
     store: VectorStore | None = None,
     out=print,
@@ -61,9 +69,25 @@ def run_sync(
 
     out(f"Discovered {len(urls)} pages.")
 
+    if conditional is _UNSET:
+        # --force or --conditional off disables the 304 pre-check; otherwise use it.
+        use_conditional = not force and conditional_mode != "off"
+        conditional = http_conditional_get if use_conditional else None
+
     with Manifest(db_path) as manifest:
-        result = detect_changes(urls, manifest, crawl=crawl)
+        result = detect_changes(urls, manifest, crawl=crawl, conditional=conditional)
         report = result.report
+
+        if conditional is not None:
+            skipped = len(result.current_hashes) - len(result.pages)
+            if result.conditional_supported is False:
+                out(
+                    "Note: this site doesn't send ETag/Last-Modified, so unchanged pages "
+                    "can't be skipped; all pages were re-crawled."
+                )
+            elif skipped > 0:
+                out(f"Skipped {skipped} unchanged page(s) via conditional requests (304).")
+
         out(
             f"Changes: {len(report.new)} new, {len(report.changed)} changed, "
             f"{len(report.deleted)} deleted, {len(report.unchanged)} unchanged."
@@ -204,6 +228,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Embedding compute device: auto (GPU if available, else CPU), cpu, or cuda "
         f"(default: {DEFAULT_DEVICE}). Falls back to CPU if a GPU isn't usable.",
     )
+    sync.add_argument(
+        "--conditional",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Use HTTP conditional requests (ETag/304) to skip re-crawling unchanged pages: "
+        "auto/on = use when the server supports it (warn if not), off = never (default: auto).",
+    )
+    sync.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore stored validators and re-crawl every page (skips the 304 pre-check).",
+    )
     return parser
 
 
@@ -221,6 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_path=args.qdrant_path,
             embed_model=args.embed_model,
             device=args.device,
+            conditional_mode=args.conditional,
+            force=args.force,
             crawl=_make_progress_crawl(args.concurrency),
         )
     return 1

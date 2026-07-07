@@ -5,9 +5,19 @@ crawl->hash->manifest->diff flow with zero network or browser. This is the payof
 making the crawler injectable and CrawledPage our own type.
 """
 
+from docforge.conditional import ConditionalResponse
 from docforge.crawler import CrawledPage
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.manifest import Manifest
+
+
+def const_conditional(mapping: dict[str, ConditionalResponse]):
+    """Fake conditional fetcher: returns a canned response per URL (default 200, no validators)."""
+
+    def _fetch(url: str, etag, last_modified) -> ConditionalResponse:
+        return mapping.get(url, ConditionalResponse(200, None, None))
+
+    return _fetch
 
 
 def make_crawler(site: dict[str, str]) -> Crawler:
@@ -87,3 +97,47 @@ def test_deletion_guard_keeps_pages_when_crawl_partially_failed() -> None:
 
         apply_changes(m, result)
         assert set(m.hashes()) == {"https://d/a", "https://d/b"}  # b preserved
+
+
+# --- conditional (304) pre-check ---
+
+def test_304_page_is_skipped_and_stays_present() -> None:
+    with Manifest(":memory:") as m:
+        site = {"https://d/a": "aaa", "https://d/b": "bbb"}
+        apply_changes(m, detect_changes(list(site), m, crawl=make_crawler(site)))
+
+        # Re-sync: server says page a is unchanged (304); page b is crawled and changed.
+        cond = const_conditional({"https://d/a": ConditionalResponse(304, '"Ea"', None)})
+        crawled: dict[str, list[str]] = {}
+
+        def crawl(urls):
+            crawled["urls"] = list(urls)
+            return [CrawledPage(url="https://d/b", markdown="bbb-new")]
+
+        result = detect_changes(list(site), m, crawl=crawl, conditional=cond)
+
+        assert "https://d/a" not in crawled["urls"]  # 304 -> never crawled
+        assert "https://d/b" in crawled["urls"]
+        assert "https://d/a" in result.report.unchanged  # present & unchanged
+        assert "https://d/a" not in result.report.deleted  # guard: not deleted
+        assert "https://d/b" in result.report.changed
+
+
+def test_conditional_supported_flag_reflects_validators() -> None:
+    with Manifest(":memory:") as m:
+        site = {"https://d/a": "aaa"}
+        no_validators = const_conditional({})  # every response is 200 with no validators
+        result = detect_changes(list(site), m, crawl=make_crawler(site), conditional=no_validators)
+        assert result.conditional_supported is False
+
+
+def test_new_validators_are_captured_and_stored() -> None:
+    with Manifest(":memory:") as m:
+        site = {"https://d/a": "aaa"}
+        cond = const_conditional({"https://d/a": ConditionalResponse(200, '"E1"', "Mon")})
+        result = detect_changes(list(site), m, crawl=make_crawler(site), conditional=cond)
+
+        assert result.conditional_supported is True
+        assert result.new_validators["https://d/a"] == ('"E1"', "Mon")
+        apply_changes(m, result)
+        assert m.validators()["https://d/a"] == ('"E1"', "Mon")

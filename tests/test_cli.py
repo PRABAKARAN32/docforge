@@ -57,6 +57,7 @@ def test_sync_reports_changes_updates_manifest_and_embeds(tmp_path) -> None:
         db_path=db,
         discover=fake_discover(list(site)),
         crawl=fake_crawl(site),
+        conditional=None,  # disable the 304 pre-check (no network in tests)
         embedder=FakeEmbedder(),
         store=store,
         out=lines.append,
@@ -83,6 +84,7 @@ def test_dry_run_writes_nothing(tmp_path) -> None:
         dry_run=True,
         discover=fake_discover(list(site)),
         crawl=fake_crawl(site),
+        conditional=None,  # disable the 304 pre-check (no network in tests)
         out=lines.append,
     )
 
@@ -130,6 +132,14 @@ def test_parser_accepts_device() -> None:
 def test_parser_rejects_unknown_device() -> None:
     with pytest.raises(SystemExit):  # argparse choices= rejects invalid values
         _build_parser().parse_args(["sync", "https://d/", "--device", "tpu"])
+
+
+def test_parser_accepts_conditional_and_force() -> None:
+    args = _build_parser().parse_args(["sync", "https://d/", "--conditional", "off", "--force"])
+    assert args.conditional == "off"
+    assert args.force is True
+    # defaults
+    assert _build_parser().parse_args(["sync", "https://d/"]).conditional == "auto"
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

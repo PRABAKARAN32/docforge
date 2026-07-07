@@ -25,11 +25,16 @@ from types import TracebackType
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pages (
-    url          TEXT PRIMARY KEY,
-    content_hash TEXT NOT NULL,
-    last_seen    TEXT NOT NULL
+    url           TEXT PRIMARY KEY,
+    content_hash  TEXT NOT NULL,
+    last_seen     TEXT NOT NULL,
+    etag          TEXT,
+    last_modified TEXT
 )
 """
+
+# Columns added after the original schema shipped -> migrate old DBs on open.
+_OPTIONAL_COLUMNS = {"etag": "TEXT", "last_modified": "TEXT"}
 
 
 def _utc_now_iso() -> str:
@@ -53,24 +58,51 @@ class Manifest:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the first schema, so old DBs upgrade cleanly."""
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(pages)")}
+        for column, col_type in _OPTIONAL_COLUMNS.items():
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE pages ADD COLUMN {column} {col_type}")
 
     def hashes(self) -> dict[str, str]:
         """Return the whole manifest as ``{url: content_hash}`` -- what diffing compares."""
         rows = self._conn.execute("SELECT url, content_hash FROM pages")
         return {row["url"]: row["content_hash"] for row in rows}
 
-    def upsert_page(self, url: str, content_hash: str, last_seen: str | None = None) -> None:
-        """Insert a page, or update its hash/timestamp if the URL already exists."""
+    def validators(self) -> dict[str, tuple[str | None, str | None]]:
+        """Return ``{url: (etag, last_modified)}`` -- the HTTP validators for 304 pre-checks."""
+        rows = self._conn.execute("SELECT url, etag, last_modified FROM pages")
+        return {row["url"]: (row["etag"], row["last_modified"]) for row in rows}
+
+    def upsert_page(
+        self,
+        url: str,
+        content_hash: str,
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        last_seen: str | None = None,
+    ) -> None:
+        """Insert a page, or update it if the URL already exists.
+
+        ``etag``/``last_modified`` use COALESCE on conflict: passing ``None`` keeps whatever
+        was already stored, so an ordinary hash update never wipes existing validators.
+        """
         self._conn.execute(
             """
-            INSERT INTO pages (url, content_hash, last_seen)
-            VALUES (?, ?, ?)
+            INSERT INTO pages (url, content_hash, last_seen, etag, last_modified)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
-                content_hash = excluded.content_hash,
-                last_seen    = excluded.last_seen
+                content_hash  = excluded.content_hash,
+                last_seen     = excluded.last_seen,
+                etag          = COALESCE(excluded.etag, pages.etag),
+                last_modified = COALESCE(excluded.last_modified, pages.last_modified)
             """,
-            (url, content_hash, last_seen or _utc_now_iso()),
+            (url, content_hash, last_seen or _utc_now_iso(), etag, last_modified),
         )
         self._conn.commit()
 

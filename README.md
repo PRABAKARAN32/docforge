@@ -63,7 +63,11 @@ docforge sync <url> --max-pages 100               # cap pages processed
 docforge sync <url> --concurrency 10              # crawl 10 pages in parallel (faster)
 docforge sync <url> --embed-model BAAI/bge-base-en-v1.5   # a larger embedding model
 docforge sync <url> --device auto                 # use GPU for embedding if available, else CPU
+docforge sync <url> --force                       # ignore ETag/304, re-crawl every page
 ```
+
+On re-syncs of sites that send `ETag`/`Last-Modified`, DocForge uses HTTP conditional requests to
+**skip re-crawling unchanged pages entirely** (a tiny request instead of a full browser render).
 
 Run it once to build the knowledge base; run it again later and **only the pages that actually
 changed** get re-crawled-and-re-embedded — unchanged pages are skipped, and a run with no changes

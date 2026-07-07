@@ -14,11 +14,9 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest", "ruff"]
 
-# Wires the `docforge` command to a main() we write in M3. Declared now so the
-# packaging shape is stable, but the module doesn't exist yet — that's fine
-# because nothing imports it until the CLI milestone.
-# [project.scripts]
-# docforge = "docforge.cli:main"
+# The `docforge` terminal command (M3), wired to cli.main().
+[project.scripts]
+docforge = "docforge.cli:main"
 
 [build-system]
 requires = ["hatchling"]

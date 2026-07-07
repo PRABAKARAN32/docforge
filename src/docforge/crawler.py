@@ -12,7 +12,7 @@ Scope (M1, slice 1): crawl an explicit list of URLs. Whole-site discovery
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
@@ -20,6 +20,10 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 # We identify ourselves honestly instead of pretending to be a human browser.
 # Ethical crawling 101: say who you are so site owners can see/contact the bot.
 DEFAULT_USER_AGENT = "DocForge/0.1 (documentation sync bot; +https://github.com/DocForge)"
+
+# Called after each page is attempted, as on_page(done, total, url) -> so a caller (the CLI)
+# can show live progress. Kept as an injected callback so the crawler stays UI-agnostic.
+ProgressCallback = Callable[[int, int, str], None]
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,7 @@ async def crawl_urls_async(
     *,
     respect_robots_txt: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
+    on_page: ProgressCallback | None = None,
 ) -> list[CrawledPage]:
     """Crawl each URL and return the pages that succeeded.
 
@@ -48,20 +53,25 @@ async def crawl_urls_async(
         reports failure, so that page is simply skipped and never fetched.
       * an honest ``user_agent`` identifying DocForge, rather than impersonating a human.
 
+    ``on_page(done, total, url)``, if given, is called after each page for progress display.
+
     Failed pages (including robots-blocked ones) are skipped rather than raising, so one
     bad URL doesn't abort the whole run. Callers that need to guard deletions (Decision
     5.5: never delete on a partial crawl) should compare the returned URL set against
     what they expected.
     """
-    browser_config = BrowserConfig(user_agent=user_agent)
-    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt)
+    browser_config = BrowserConfig(user_agent=user_agent, verbose=False)
+    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt, verbose=False)
 
+    total = len(urls)
     pages: list[CrawledPage] = []
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        for url in urls:
+        for index, url in enumerate(urls, start=1):
             result = await crawler.arun(url=url, config=run_config)
             if result.success:
                 pages.append(CrawledPage(url=result.url, markdown=str(result.markdown)))
+            if on_page is not None:
+                on_page(index, total, url)
     return pages
 
 
@@ -70,10 +80,16 @@ def crawl_urls(
     *,
     respect_robots_txt: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
+    on_page: ProgressCallback | None = None,
 ) -> list[CrawledPage]:
     """Synchronous convenience wrapper around :func:`crawl_urls_async`."""
     return asyncio.run(
-        crawl_urls_async(urls, respect_robots_txt=respect_robots_txt, user_agent=user_agent)
+        crawl_urls_async(
+            urls,
+            respect_robots_txt=respect_robots_txt,
+            user_agent=user_agent,
+            on_page=on_page,
+        )
     )
 
 
@@ -107,8 +123,8 @@ async def fetch_page_links_async(
     Used by BFS discovery to walk a site that has no sitemap. Returns ``[]`` if the
     page fails to crawl (including robots-blocked), so a bad page doesn't abort the walk.
     """
-    browser_config = BrowserConfig(user_agent=user_agent)
-    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt)
+    browser_config = BrowserConfig(user_agent=user_agent, verbose=False)
+    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt, verbose=False)
     async with AsyncWebCrawler(config=browser_config) as crawler:
         result = await crawler.arun(url=url, config=run_config)
         if not result.success:

@@ -29,6 +29,19 @@ def make_crawler(site: dict[str, str]) -> Crawler:
     return _crawl
 
 
+def crawler_with_validators(site: dict[str, str], *, etag=None, last_modified=None) -> Crawler:
+    """Like make_crawler, but the returned pages carry HTTP validators (as a real crawl would)."""
+
+    def _crawl(urls):
+        return [
+            CrawledPage(url=u, markdown=site[u], etag=etag, last_modified=last_modified)
+            for u in urls
+            if u in site
+        ]
+
+    return _crawl
+
+
 def test_first_run_marks_everything_new_and_populates_manifest() -> None:
     site = {"https://d/a": "# A\n\nAlpha.", "https://d/b": "# B\n\nBeta."}
     with Manifest(":memory:") as m:
@@ -101,10 +114,29 @@ def test_deletion_guard_keeps_pages_when_crawl_partially_failed() -> None:
 
 # --- conditional (304) pre-check ---
 
+def test_first_sync_makes_no_conditional_requests() -> None:
+    # The whole point of the fix: with an empty manifest nothing can 304, so the pre-check
+    # must issue ZERO requests (no silent wait before crawling).
+    calls: list[str] = []
+
+    def counting_conditional(url, etag, last_modified) -> ConditionalResponse:
+        calls.append(url)
+        return ConditionalResponse(200, None, None)
+
+    site = {f"https://d/{i}": "x" for i in range(50)}
+    with Manifest(":memory:") as m:
+        detect_changes(list(site), m, crawl=make_crawler(site), conditional=counting_conditional)
+
+    assert calls == []  # first sync -> no stored validators -> no pre-check requests at all
+
+
+
+
 def test_304_page_is_skipped_and_stays_present() -> None:
     with Manifest(":memory:") as m:
         site = {"https://d/a": "aaa", "https://d/b": "bbb"}
-        apply_changes(m, detect_changes(list(site), m, crawl=make_crawler(site)))
+        # First sync captures validators (as a real crawl would) so a 304 can happen next time.
+        apply_changes(m, detect_changes(list(site), m, crawl=crawler_with_validators(site, etag='"v1"')))
 
         # Re-sync: server says page a is unchanged (304); page b is crawled and changed.
         cond = const_conditional({"https://d/a": ConditionalResponse(304, '"Ea"', None)})
@@ -131,11 +163,12 @@ def test_conditional_supported_flag_reflects_validators() -> None:
         assert result.conditional_supported is False
 
 
-def test_new_validators_are_captured_and_stored() -> None:
+def test_new_validators_are_captured_from_the_crawl_and_stored() -> None:
     with Manifest(":memory:") as m:
         site = {"https://d/a": "aaa"}
-        cond = const_conditional({"https://d/a": ConditionalResponse(200, '"E1"', "Mon")})
-        result = detect_changes(list(site), m, crawl=make_crawler(site), conditional=cond)
+        # Validators now come from the crawl response headers, not a separate pre-check.
+        crawl = crawler_with_validators(site, etag='"E1"', last_modified="Mon")
+        result = detect_changes(list(site), m, crawl=crawl, conditional=const_conditional({}))
 
         assert result.conditional_supported is True
         assert result.new_validators["https://d/a"] == ('"E1"', "Mon")

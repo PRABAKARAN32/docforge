@@ -56,34 +56,33 @@ def _preselect(
     previous_hashes: dict[str, str],
     validators: Validators,
     conditional: ConditionalFetcher | None,
-) -> tuple[list[str], dict[str, str], Validators, bool]:
+) -> tuple[list[str], dict[str, str], bool]:
     """Split URLs into those to crawl vs. those the server confirmed unchanged (304).
 
-    When ``conditional`` is None the pre-check is off -> crawl everything (today's behavior).
-    Otherwise, ask the server about each URL: a 304 (for a page we already know) is skipped
-    and keeps its stored hash; anything else is crawled, and any fresh validators are kept.
+    A conditional request is only worth making for a URL we've **seen before and have a stored
+    validator for** -- only those can possibly come back 304. New pages (and *every* page on a
+    first sync, when nothing is stored yet) skip straight to crawling: no wasted requests, and
+    the crawl itself captures fresh validators for next time. This is why a first sync no longer
+    stalls doing thousands of pointless conditional GETs.
     """
     if conditional is None:
-        return list(urls), {}, {}, False
+        return list(urls), {}, False
 
     to_crawl: list[str] = []
     unchanged_304: dict[str, str] = {}
-    new_validators: Validators = {}
     any_validators = False
 
     for url in urls:
         etag, last_modified = validators.get(url, (None, None))
-        response = conditional(url, etag, last_modified)
-        any_validators = any_validators or response.has_validators
+        if (etag or last_modified) and url in previous_hashes:
+            response = conditional(url, etag, last_modified)
+            any_validators = any_validators or response.has_validators
+            if response.not_modified:
+                unchanged_304[url] = previous_hashes[url]
+                continue
+        to_crawl.append(url)
 
-        if response.not_modified and url in previous_hashes:
-            unchanged_304[url] = previous_hashes[url]
-        else:
-            to_crawl.append(url)
-            if response.has_validators:
-                new_validators[url] = (response.etag, response.last_modified)
-
-    return to_crawl, unchanged_304, new_validators, any_validators
+    return to_crawl, unchanged_304, any_validators
 
 
 def detect_changes(
@@ -105,7 +104,7 @@ def detect_changes(
     previous_hashes = manifest.hashes()
     stored_validators = manifest.validators()
 
-    to_crawl, unchanged_304, new_validators, any_validators = _preselect(
+    to_crawl, unchanged_304, precheck_saw_validators = _preselect(
         urls, previous_hashes, stored_validators, conditional
     )
 
@@ -114,8 +113,19 @@ def detect_changes(
     crawled_hashes = {url: content_hash(md) for url, md in markdown_by_url.items()}
     current_hashes = {**unchanged_304, **crawled_hashes}
 
+    # Validators come from the crawl responses themselves (captured for next sync's pre-check).
+    new_validators: Validators = {
+        page.url: (page.etag, page.last_modified)
+        for page in pages
+        if page.etag or page.last_modified
+    }
+
     report = diff_hashes(previous_hashes, current_hashes)
     crawl_succeeded = len(pages) == len(to_crawl)
+
+    conditional_supported = None
+    if conditional is not None:
+        conditional_supported = bool(new_validators) or precheck_saw_validators
 
     return ChangeDetectionResult(
         report=report,
@@ -123,7 +133,7 @@ def detect_changes(
         crawl_succeeded=crawl_succeeded,
         pages=markdown_by_url,
         new_validators=new_validators,
-        conditional_supported=None if conditional is None else any_validators,
+        conditional_supported=conditional_supported,
     )
 
 

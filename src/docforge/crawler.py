@@ -50,6 +50,16 @@ class CrawledPage:
 
     url: str
     markdown: str
+    # HTTP validators from the response, captured for the 304 pre-check on future syncs.
+    etag: str | None = None
+    last_modified: str | None = None
+
+
+def _validators_from(result: object) -> tuple[str | None, str | None]:
+    """Pull (etag, last_modified) out of a Crawl4AI result's response headers, if any."""
+    raw = getattr(result, "response_headers", None) or {}
+    headers = {str(k).lower(): v for k, v in raw.items()}
+    return headers.get("etag"), headers.get("last-modified")
 
 
 async def crawl_urls_async(
@@ -109,7 +119,15 @@ async def crawl_urls_async(
         ):
             done += 1
             if result.success:
-                pages.append(CrawledPage(url=result.url, markdown=str(result.markdown)))
+                etag, last_modified = _validators_from(result)
+                pages.append(
+                    CrawledPage(
+                        url=result.url,
+                        markdown=str(result.markdown),
+                        etag=etag,
+                        last_modified=last_modified,
+                    )
+                )
             if on_page is not None:
                 on_page(done, total, getattr(result, "url", ""))
     return pages

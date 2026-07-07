@@ -17,6 +17,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
+from docforge import __version__
 from docforge.conditional import http_conditional_get
 from docforge.crawler import DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
@@ -161,90 +162,128 @@ def _make_progress_crawl(concurrency: int) -> Crawler:
     return _crawl
 
 
+_SYNC_EXAMPLES = """\
+examples:
+  docforge sync https://docs.example.com/               build / refresh the knowledge base
+  docforge sync https://nginx.org/en/docs/ --bfs        crawl page-by-page (site has no sitemap)
+  docforge sync <url> --dry-run                         preview changes, write nothing
+  docforge sync <url> --max-pages 50 --concurrency 10   cap pages; crawl 10 in parallel
+  docforge sync <url> --qdrant-path ./vectors           no Docker (Qdrant embedded on disk)
+  docforge sync <url> --device cuda                     use a GPU for embedding
+  docforge sync <url> --force                           ignore ETag/304 and re-crawl everything
+
+A vector store is required: run `docker compose up -d` (Qdrant on :6333), or pass --qdrant-path DIR.
+"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docforge",
-        description="Keep a documentation knowledge base in sync by detecting only what changed.",
+        description="DocForge keeps a documentation knowledge base fresh: it detects exactly which "
+        "pages changed and embeds only those into a vector store.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="version", version=f"docforge {__version__}")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
-    sync = subparsers.add_parser("sync", help="Detect and record what changed on a docs site.")
+    sync = subparsers.add_parser(
+        "sync",
+        help="Crawl a docs site, detect what changed, and embed it into the vector store.",
+        description="Discover a documentation site's pages, crawl them, detect exactly what "
+        "changed since the last run, and embed only the new/changed pages into the vector store "
+        "(deleting stale chunks first). Re-running with no changes does nothing.",
+        epilog=_SYNC_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sync.add_argument("url", help="The documentation site URL to sync.")
-    sync.add_argument(
+
+    crawling = sync.add_argument_group("crawling")
+    crawling.add_argument(
         "--bfs",
         action="store_true",
         help="If the site has no sitemap, crawl it page-by-page instead.",
     )
-    sync.add_argument(
+    crawling.add_argument(
         "--max-pages",
         type=int,
         default=None,
         metavar="N",
         help="Maximum pages to process (default: no limit).",
     )
-    sync.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would change without writing to the manifest.",
-    )
-    sync.add_argument(
-        "--db",
-        default="docforge.db",
-        metavar="PATH",
-        help="Path to the manifest database file (default: docforge.db).",
-    )
-    sync.add_argument(
-        "--qdrant-url",
-        default="http://localhost:6333",
-        metavar="URL",
-        help="Qdrant server URL: our Docker container, a native install, or remote "
-        "(default: http://localhost:6333).",
-    )
-    sync.add_argument(
-        "--qdrant-path",
-        default=None,
-        metavar="DIR",
-        help="Run Qdrant embedded (no Docker/server), storing vectors in this local folder. "
-        "Takes precedence over --qdrant-url.",
-    )
-    sync.add_argument(
-        "--embed-model",
-        default=DEFAULT_MODEL,
-        metavar="NAME",
-        help=f"fastembed model name for embeddings (default: {DEFAULT_MODEL}).",
-    )
-    sync.add_argument(
+    crawling.add_argument(
         "--concurrency",
         type=int,
         default=DEFAULT_CONCURRENCY,
         metavar="N",
-        help=f"How many pages to crawl in parallel (default: {DEFAULT_CONCURRENCY}). "
+        help=f"Pages to crawl in parallel (default: {DEFAULT_CONCURRENCY}). "
         "Higher is faster but heavier on the target server.",
     )
-    sync.add_argument(
-        "--device",
-        choices=["auto", "cpu", "cuda"],
-        default=DEFAULT_DEVICE,
-        help="Embedding compute device: auto (GPU if available, else CPU), cpu, or cuda "
-        f"(default: {DEFAULT_DEVICE}). Falls back to CPU if a GPU isn't usable.",
+
+    detection = sync.add_argument_group("change detection")
+    detection.add_argument(
+        "--db",
+        default="docforge.db",
+        metavar="PATH",
+        help="Path to the manifest database file, storing page hashes (default: docforge.db).",
     )
-    sync.add_argument(
+    detection.add_argument(
         "--conditional",
         choices=["auto", "on", "off"],
         default="auto",
         help="Use HTTP conditional requests (ETag/304) to skip re-crawling unchanged pages: "
         "auto/on = use when the server supports it (warn if not), off = never (default: auto).",
     )
-    sync.add_argument(
+    detection.add_argument(
         "--force",
         action="store_true",
         help="Ignore stored validators and re-crawl every page (skips the 304 pre-check).",
+    )
+
+    vector_store = sync.add_argument_group("vector store")
+    vector_store.add_argument(
+        "--qdrant-url",
+        default="http://localhost:6333",
+        metavar="URL",
+        help="Qdrant server URL: Docker container, native install, or remote "
+        "(default: http://localhost:6333).",
+    )
+    vector_store.add_argument(
+        "--qdrant-path",
+        default=None,
+        metavar="DIR",
+        help="Run Qdrant embedded (no Docker), storing vectors in this local folder. "
+        "Takes precedence over --qdrant-url.",
+    )
+
+    embedding = sync.add_argument_group("embedding")
+    embedding.add_argument(
+        "--embed-model",
+        default=DEFAULT_MODEL,
+        metavar="NAME",
+        help=f"fastembed model name for embeddings (default: {DEFAULT_MODEL}).",
+    )
+    embedding.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default=DEFAULT_DEVICE,
+        help="Embedding compute device: auto (GPU if available, else CPU), cpu, or cuda "
+        f"(default: {DEFAULT_DEVICE}). Falls back to CPU if a GPU isn't usable.",
+    )
+
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing anything (no embedding, no manifest update).",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:  # bare `docforge` -> show help instead of an error
+        parser.print_help()
+        return 0
 
     if args.command == "sync":
         return run_sync(

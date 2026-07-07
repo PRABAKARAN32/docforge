@@ -143,6 +143,15 @@ def test_parser_accepts_conditional_and_force() -> None:
     assert _build_parser().parse_args(["sync", "https://d/"]).conditional == "auto"
 
 
+def test_parser_accepts_qdrant_api_key() -> None:
+    args = _build_parser().parse_args(["sync", "https://d/", "--qdrant-api-key", "secret"])
+    assert args.qdrant_api_key == "secret"
+    # search and remove also accept it
+    assert _build_parser().parse_args(
+        ["search", "q", "--qdrant-api-key", "k"]
+    ).qdrant_api_key == "k"
+
+
 def test_parser_supports_all_subcommands() -> None:
     parser = _build_parser()
     assert parser.parse_args(["diff", "https://d/"]).command == "diff"

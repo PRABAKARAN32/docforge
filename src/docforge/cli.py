@@ -14,6 +14,7 @@ no Docker). :func:`main` wires the real functions, argument parsing, and live pr
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 
@@ -46,13 +47,17 @@ except ImportError:  # pragma: no cover -- fallback keeps help working without t
     _HelpFormatter = argparse.RawDescriptionHelpFormatter
 
 
-def _open_store(qdrant_url: str, qdrant_path: str | None):
-    """Open the Qdrant store: embedded (--qdrant-path) if given, else the server URL."""
+def _open_store(qdrant_url: str, qdrant_path: str | None, api_key: str | None = None):
+    """Open the Qdrant store: embedded (--qdrant-path) if given, else the server URL.
+
+    ``api_key`` authenticates to a remote/managed Qdrant (e.g. Qdrant Cloud); ignored in
+    embedded (path) mode.
+    """
     from docforge.vectorstore import QdrantVectorStore
 
     if qdrant_path is not None:
         return QdrantVectorStore(path=qdrant_path)
-    return QdrantVectorStore(url=qdrant_url)
+    return QdrantVectorStore(url=qdrant_url, api_key=api_key)
 
 
 def run_sync(
@@ -64,6 +69,7 @@ def run_sync(
     dry_run: bool = False,
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
+    qdrant_api_key: str | None = None,
     embed_model: str = DEFAULT_MODEL,
     device: str = DEFAULT_DEVICE,
     conditional_mode: str = "auto",
@@ -129,7 +135,8 @@ def run_sync(
             to_embed = len(report.new) + len(report.changed)
             out(f"Embedding {to_embed} changed page(s) into the vector store ...")
             if not _embed_into_store(
-                result, qdrant_url, qdrant_path, embed_model, device, embedder, store, out
+                result, qdrant_url, qdrant_path, qdrant_api_key, embed_model, device,
+                embedder, store, out,
             ):
                 return 1
 
@@ -140,7 +147,7 @@ def run_sync(
 
 
 def _embed_into_store(
-    result, qdrant_url, qdrant_path, embed_model, device, embedder, store, out
+    result, qdrant_url, qdrant_path, qdrant_api_key, embed_model, device, embedder, store, out
 ) -> bool:
     """Embed changes into the vector store; return False (with a helpful message) on error."""
     try:
@@ -150,7 +157,7 @@ def _embed_into_store(
             embedder = FastEmbedEmbedder(embed_model, device=device)
             out(f"  (embedding device: {embedder.device})")
         if store is None:
-            store = _open_store(qdrant_url, qdrant_path)
+            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key)
         embed_changes(result, embedder, store)
     except Exception as exc:  # noqa: BLE001 -- surface any store/model failure as a clean message
         out(f"Vector store error: {exc}")
@@ -228,6 +235,7 @@ def run_search(
     *,
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
+    qdrant_api_key: str | None = None,
     embed_model: str = DEFAULT_MODEL,
     device: str = DEFAULT_DEVICE,
     limit: int = 5,
@@ -242,7 +250,7 @@ def run_search(
 
             embedder = FastEmbedEmbedder(embed_model, device=device)
         if store is None:
-            store = _open_store(qdrant_url, qdrant_path)
+            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key)
         vector = embedder.embed([query])[0]
         hits = store.search(vector, limit=limit)
     except Exception as exc:  # noqa: BLE001 -- clean message instead of a traceback
@@ -266,6 +274,7 @@ def run_remove(
     db_path: str = "docforge.db",
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
+    qdrant_api_key: str | None = None,
     store: VectorStore | None = None,
     out=print,
 ) -> int:
@@ -281,7 +290,7 @@ def run_remove(
 
         try:
             if store is None:
-                store = _open_store(qdrant_url, qdrant_path)
+                store = _open_store(qdrant_url, qdrant_path, qdrant_api_key)
             for url in matching:
                 store.delete_by_source_url(url)
         except Exception as exc:  # noqa: BLE001 -- vector store may be down; report cleanly
@@ -372,6 +381,11 @@ def _add_vector_store_flags(sub: argparse.ArgumentParser) -> None:
         "--qdrant-path", default=None, metavar="DIR",
         help="Run Qdrant embedded (no Docker), storing vectors in this local folder. "
         "Takes precedence over --qdrant-url.",
+    )
+    group.add_argument(
+        "--qdrant-api-key", default=None, metavar="KEY",
+        help="API key for a remote/managed Qdrant (e.g. Qdrant Cloud). Prefer the "
+        "QDRANT_API_KEY environment variable to keep the key out of shell history.",
     )
 
 
@@ -482,6 +496,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    # API key: the --qdrant-api-key flag overrides the QDRANT_API_KEY env var (the secure default).
+    api_key = getattr(args, "qdrant_api_key", None) or os.getenv("QDRANT_API_KEY")
+
     if args.command == "sync":
         return run_sync(
             args.url,
@@ -491,6 +508,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
+            qdrant_api_key=api_key,
             embed_model=args.embed_model,
             device=args.device,
             conditional_mode=args.conditional,
@@ -514,6 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.query,
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
+            qdrant_api_key=api_key,
             embed_model=args.embed_model,
             device=args.device,
             limit=args.limit,
@@ -524,6 +543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             db_path=args.db,
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
+            qdrant_api_key=api_key,
         )
     return 1
 

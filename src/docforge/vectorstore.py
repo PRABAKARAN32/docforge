@@ -66,16 +66,20 @@ class QdrantVectorStore:
         client: QdrantClient | None = None,
         url: str = "http://localhost:6333",
         path: str | None = None,
+        api_key: str | None = None,
         collection: str = "docforge",
     ) -> None:
         # Three ways to connect, in priority order:
         #   client=...  -> injected (tests use QdrantClient(location=":memory:"))
         #   path=...    -> embedded on-disk Qdrant, in-process, NO server/Docker (like SQLite)
-        #   url=...     -> a Qdrant server (our Docker container, a native install, or remote)
+        #   url=...     -> a Qdrant server (Docker, native, or remote/Qdrant Cloud with api_key)
         if client is None:
             from qdrant_client import QdrantClient as _QdrantClient
 
-            client = _QdrantClient(path=path) if path is not None else _QdrantClient(url=url)
+            if path is not None:
+                client = _QdrantClient(path=path)
+            else:
+                client = _QdrantClient(url=url, api_key=api_key)
         self._client = client
         self._collection = collection
 

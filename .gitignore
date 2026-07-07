@@ -24,3 +24,7 @@ Notes/
 dist/
 build/
 *.egg-info/
+
+# Local DB
+SQLDB/*
+vectorDB/*

@@ -1,15 +1,14 @@
 """The ``docforge`` command-line interface.
 
-M3 exposes the M1 change-detection pipeline as one command::
+The ``docforge`` command runs the whole pipeline as one command::
 
-    docforge sync <url> [--bfs] [--max-pages N] [--dry-run] [--db PATH]
+    docforge sync <url> [--bfs] [--max-pages N] [--dry-run] [--db PATH] [--qdrant-url URL]
 
-It runs discover -> detect -> (apply). Embedding into a vector store is M2; until then
-``sync`` maintains the manifest and reports what changed.
+It runs discover -> detect -> embed changed pages into the vector store -> apply (manifest).
 
-Design: :func:`run_sync` holds the logic and takes ``discover``, ``crawl``, and ``out`` as
-injected dependencies, so it is unit-tested with fakes (no network). :func:`main` wires the
-real functions, argument parsing, and live progress output.
+Design: :func:`run_sync` holds the logic and takes ``discover``, ``crawl``, ``embedder``,
+``store``, and ``out`` as injected dependencies, so it is unit-tested with fakes (no network,
+no Docker). :func:`main` wires the real functions, argument parsing, and live progress output.
 """
 
 from __future__ import annotations
@@ -20,8 +19,12 @@ from collections.abc import Sequence
 
 from docforge.crawler import CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
+from docforge.diff import deletions_to_apply
 from docforge.discovery import discover_urls
+from docforge.embedder import Embedder
 from docforge.manifest import Manifest
+from docforge.rag import embed_changes
+from docforge.vectorstore import VectorStore
 
 
 def run_sync(
@@ -31,13 +34,16 @@ def run_sync(
     allow_bfs: bool = False,
     max_pages: int | None = None,
     dry_run: bool = False,
+    qdrant_url: str = "http://localhost:6333",
     discover=discover_urls,
     crawl: Crawler = crawl_urls,
+    embedder: Embedder | None = None,
+    store: VectorStore | None = None,
     out=print,
 ) -> int:
-    """Run one ``sync``: discover pages, detect changes, and (unless dry-run) apply them.
+    """Run one ``sync``: discover, detect changes, embed the changed pages, update the manifest.
 
-    Returns a process exit code (0 = success, 1 = nothing to do / no pages found).
+    Returns a process exit code (0 = success, 1 = nothing to do / no pages / vector-store error).
     """
     out(f"Discovering pages for {seed_url} ...")
     urls = discover(seed_url, allow_bfs=allow_bfs, max_pages=max_pages)
@@ -64,11 +70,40 @@ def run_sync(
 
         if dry_run:
             out("Dry run: no changes written.")
-        else:
-            apply_changes(manifest, result)
-            out("Manifest updated.")
+            return 0
+
+        needs_store = report.has_content_changes or bool(
+            deletions_to_apply(report, crawl_succeeded=result.crawl_succeeded)
+        )
+        if needs_store:
+            to_embed = len(report.new) + len(report.changed)
+            out(f"Embedding {to_embed} changed page(s) into the vector store ...")
+            if not _embed_into_store(result, qdrant_url, embedder, store, out):
+                return 1
+
+        apply_changes(manifest, result)
+        out("Manifest updated.")
 
     return 0
+
+
+def _embed_into_store(result, qdrant_url, embedder, store, out) -> bool:
+    """Embed changes into the vector store; return False (with a helpful message) on error."""
+    try:
+        if embedder is None:
+            from docforge.embedder import FastEmbedEmbedder
+
+            embedder = FastEmbedEmbedder()
+        if store is None:
+            from docforge.vectorstore import QdrantVectorStore
+
+            store = QdrantVectorStore(url=qdrant_url)
+        embed_changes(result, embedder, store)
+    except Exception as exc:  # noqa: BLE001 -- surface any store/model failure as a clean message
+        out(f"Vector store error: {exc}")
+        out(f"Is Qdrant running? Start it with: docker compose up -d  (expected at {qdrant_url})")
+        return False
+    return True
 
 
 def _progress_crawl(urls: Sequence[str]) -> list[CrawledPage]:
@@ -116,6 +151,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to the manifest database file (default: docforge.db).",
     )
+    sync.add_argument(
+        "--qdrant-url",
+        default="http://localhost:6333",
+        metavar="URL",
+        help="Qdrant vector-store URL (default: http://localhost:6333).",
+    )
     return parser
 
 
@@ -129,6 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_bfs=args.bfs,
             max_pages=args.max_pages,
             dry_run=args.dry_run,
+            qdrant_url=args.qdrant_url,
             crawl=_progress_crawl,
         )
     return 1

@@ -1,8 +1,33 @@
-"""Tests for the CLI's run_sync, driven by injected fakes (no network/browser)."""
+"""Tests for the CLI's run_sync, driven by injected fakes (no network/browser).
+
+The vector store is a real in-process Qdrant (`location=":memory:"`) and the embedder is a
+tiny fake, so the full sync path runs with no Docker and no model download.
+"""
+
+from collections.abc import Sequence
 
 from docforge.cli import run_sync
 from docforge.crawler import CrawledPage
 from docforge.manifest import Manifest
+from docforge.vectorstore import QdrantVectorStore
+
+
+class FakeEmbedder:
+    def __init__(self, dim: int = 4) -> None:
+        self._dim = dim
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[float(len(t)), 0.0, 0.0, 0.0] for t in texts]
+
+
+def memory_store() -> QdrantVectorStore:
+    from qdrant_client import QdrantClient
+
+    return QdrantVectorStore(client=QdrantClient(location=":memory:"), collection="test")
 
 
 def fake_discover(urls: list[str]):
@@ -19,9 +44,10 @@ def fake_crawl(site: dict[str, str]):
     return _crawl
 
 
-def test_sync_reports_changes_and_updates_manifest(tmp_path) -> None:
+def test_sync_reports_changes_updates_manifest_and_embeds(tmp_path) -> None:
     db = str(tmp_path / "d.db")
-    site = {"https://d/a": "# A", "https://d/b": "# B"}
+    site = {"https://d/a": "# A\n\nAlpha.", "https://d/b": "# B\n\nBeta."}
+    store = memory_store()
     lines: list[str] = []
 
     code = run_sync(
@@ -29,15 +55,19 @@ def test_sync_reports_changes_and_updates_manifest(tmp_path) -> None:
         db_path=db,
         discover=fake_discover(list(site)),
         crawl=fake_crawl(site),
+        embedder=FakeEmbedder(),
+        store=store,
         out=lines.append,
     )
 
     assert code == 0
     assert any("Discovered 2 pages." in line for line in lines)
     assert any("2 new" in line for line in lines)
+    assert any("Embedding 2 changed page(s)" in line for line in lines)
     assert any("Manifest updated." in line for line in lines)
     with Manifest(db) as m:
         assert set(m.hashes()) == set(site)
+    assert store.count() > 0  # chunks were embedded into the vector store
 
 
 def test_dry_run_writes_nothing(tmp_path) -> None:

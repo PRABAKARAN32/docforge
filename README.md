@@ -39,12 +39,24 @@ DOCFORGE_NETWORK_TESTS=1 uv run pytest      # include live-crawl integration tes
 
 ## Usage
 
+Start the vector database (Qdrant) once — it runs in Docker and persists to a named volume:
+
 ```bash
-# Coming in M3 — the one-command interface:
-docforge sync <docs-site-url>
+docker compose up -d
 ```
 
-Run it once to build the knowledge base; run it again months later and only the pages that actually changed get re-processed.
+Then sync a documentation site into the knowledge base:
+
+```bash
+docforge sync https://docs.example.com/         # sitemap-based discovery
+docforge sync https://nginx.org/en/docs/ --bfs  # no sitemap? crawl page-by-page
+docforge sync <url> --dry-run                    # preview changes, write nothing
+docforge sync <url> --max-pages 100              # cap pages processed
+```
+
+Run it once to build the knowledge base; run it again later and **only the pages that actually
+changed** get re-crawled-and-re-embedded — unchanged pages are skipped, and a run with no changes
+does nothing. Vectors are stored in Qdrant; page hashes in a local SQLite manifest.
 
 ## License
 

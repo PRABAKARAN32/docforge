@@ -39,6 +39,9 @@ class ChangeDetectionResult:
     report: DiffReport
     current_hashes: dict[str, str]
     crawl_succeeded: bool
+    # url -> markdown for the pages crawled this run. The RAG sync (M2) needs the content
+    # of new/changed pages to chunk + embed them; unchanged pages' markdown is unused.
+    pages: dict[str, str]
 
 
 def detect_changes(
@@ -55,7 +58,8 @@ def detect_changes(
     a conservative signal; site discovery in a later milestone can refine it.)
     """
     pages = crawl(urls)
-    current_hashes = {page.url: content_hash(page.markdown) for page in pages}
+    markdown_by_url = {page.url: page.markdown for page in pages}
+    current_hashes = {url: content_hash(md) for url, md in markdown_by_url.items()}
     previous_hashes = manifest.hashes()
 
     report = diff_hashes(previous_hashes, current_hashes)
@@ -65,6 +69,7 @@ def detect_changes(
         report=report,
         current_hashes=current_hashes,
         crawl_succeeded=crawl_succeeded,
+        pages=markdown_by_url,
     )
 
 

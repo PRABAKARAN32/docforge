@@ -27,3 +27,13 @@ def test_crawl_urls_returns_markdown_for_a_real_page() -> None:
     assert page.url.startswith("https://example.com")
     # example.com always contains this heading; proves we got real cleaned markdown.
     assert "Example Domain" in page.markdown
+
+
+@pytest.mark.skipif(not _NETWORK, reason="set DOCFORGE_NETWORK_TESTS=1 to run network tests")
+def test_crawl_multiple_urls_concurrently() -> None:
+    # Both are reserved example domains; exercises the concurrent arun_many path.
+    pages = crawl_urls(["https://example.com", "https://example.org"], concurrency=2)
+    urls = {p.url for p in pages}
+    assert len(pages) == 2
+    assert any("example.com" in u for u in urls)
+    assert any("example.org" in u for u in urls)

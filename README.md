@@ -60,6 +60,7 @@ More options:
 docforge sync https://nginx.org/en/docs/ --bfs   # no sitemap? crawl page-by-page
 docforge sync <url> --dry-run                     # preview changes, write nothing
 docforge sync <url> --max-pages 100               # cap pages processed
+docforge sync <url> --concurrency 10              # crawl 10 pages in parallel (faster)
 docforge sync <url> --embed-model BAAI/bge-base-en-v1.5   # a larger embedding model
 ```
 

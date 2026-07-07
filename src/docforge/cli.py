@@ -17,7 +17,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from docforge.crawler import CrawledPage, crawl_urls
+from docforge.crawler import DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
 from docforge.discovery import discover_urls
@@ -118,17 +118,21 @@ def _embed_into_store(
     return True
 
 
-def _progress_crawl(urls: Sequence[str]) -> list[CrawledPage]:
-    """Real crawler wrapped with a live progress line (used by :func:`main`)."""
-    total = len(urls)
+def _make_progress_crawl(concurrency: int) -> Crawler:
+    """Build a real crawler (at the given concurrency) wrapped with a live progress line."""
 
-    def on_page(done: int, _total: int, _url: str) -> None:
-        print(f"\rCrawling {done}/{total} ...", end="", flush=True)
+    def _crawl(urls: Sequence[str]) -> list[CrawledPage]:
+        total = len(urls)
 
-    pages = crawl_urls(urls, on_page=on_page)
-    if total:
-        print()  # end the progress line with a newline
-    return pages
+        def on_page(done: int, _total: int, _url: str) -> None:
+            print(f"\rCrawling {done}/{total} ...", end="", flush=True)
+
+        pages = crawl_urls(urls, concurrency=concurrency, on_page=on_page)
+        if total:
+            print()  # end the progress line with a newline
+        return pages
+
+    return _crawl
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -183,6 +187,14 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=f"fastembed model name for embeddings (default: {DEFAULT_MODEL}).",
     )
+    sync.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        metavar="N",
+        help=f"How many pages to crawl in parallel (default: {DEFAULT_CONCURRENCY}). "
+        "Higher is faster but heavier on the target server.",
+    )
     return parser
 
 
@@ -199,7 +211,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
             embed_model=args.embed_model,
-            crawl=_progress_crawl,
+            crawl=_make_progress_crawl(args.concurrency),
         )
     return 1
 

@@ -5,8 +5,8 @@ solved problem — we don't reinvent it). Its only job is to adapt Crawl4AI's ri
 result objects into a small, stable shape (`CrawledPage`) that the rest of DocForge
 depends on. If we ever swap the crawler, only this file changes.
 
-Scope (M1, slice 1): crawl an explicit list of URLs. Whole-site discovery
-(sitemap / deep crawl) is a deliberate follow-up, kept out to keep this slice small.
+Crawls an explicit list of URLs concurrently (via Crawl4AI's ``arun_many`` + a memory-aware
+dispatcher and rate limiter). Whole-site discovery lives in ``discovery.py``.
 """
 
 from __future__ import annotations
@@ -15,11 +15,20 @@ import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+from crawl4ai import (
+    AsyncWebCrawler,
+    BrowserConfig,
+    CrawlerRunConfig,
+    MemoryAdaptiveDispatcher,
+    RateLimiter,
+)
 
 # We identify ourselves honestly instead of pretending to be a human browser.
 # Ethical crawling 101: say who you are so site owners can see/contact the bot.
 DEFAULT_USER_AGENT = "DocForge/0.1 (documentation sync bot; +https://github.com/DocForge)"
+
+# Modest default so we're fast but polite -- a handful of pages in flight, not hundreds.
+DEFAULT_CONCURRENCY = 5
 
 # Called after each page is attempted, as on_page(done, total, url) -> so a caller (the CLI)
 # can show live progress. Kept as an injected callback so the crawler stays UI-agnostic.
@@ -44,34 +53,50 @@ async def crawl_urls_async(
     *,
     respect_robots_txt: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
+    concurrency: int = DEFAULT_CONCURRENCY,
     on_page: ProgressCallback | None = None,
 ) -> list[CrawledPage]:
-    """Crawl each URL and return the pages that succeeded.
+    """Crawl the URLs concurrently and return the pages that succeeded.
+
+    Uses Crawl4AI's ``arun_many`` with a ``MemoryAdaptiveDispatcher`` (caps concurrency by
+    RAM so many browser tabs can't OOM the machine) and a ``RateLimiter`` (polite delays +
+    exponential backoff on 429/503). ``concurrency`` is the max pages in flight — kept modest
+    by default so we're fast but not abusive. Streaming is on, so results arrive as each page
+    finishes, driving ``on_page(done, total, url)`` live even while others crawl.
 
     Ethical defaults (see Notes/M1 on crawling ethics):
-      * ``respect_robots_txt=True`` — if a site's robots.txt disallows a URL, Crawl4AI
-        reports failure, so that page is simply skipped and never fetched.
-      * an honest ``user_agent`` identifying DocForge, rather than impersonating a human.
+      * ``respect_robots_txt=True`` — robots-disallowed URLs are reported failed and skipped.
+      * an honest ``user_agent`` identifying DocForge.
 
-    ``on_page(done, total, url)``, if given, is called after each page for progress display.
-
-    Failed pages (including robots-blocked ones) are skipped rather than raising, so one
-    bad URL doesn't abort the whole run. Callers that need to guard deletions (Decision
-    5.5: never delete on a partial crawl) should compare the returned URL set against
-    what they expected.
+    Failed pages (including robots-blocked ones) are skipped rather than raising, so one bad
+    URL doesn't abort the run. Callers that guard deletions (Decision 5.5) should compare the
+    returned URL set against what they expected.
     """
     browser_config = BrowserConfig(user_agent=user_agent, verbose=False)
-    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt, verbose=False)
+    run_config = CrawlerRunConfig(check_robots_txt=respect_robots_txt, verbose=False, stream=True)
+    dispatcher = MemoryAdaptiveDispatcher(
+        memory_threshold_percent=70.0,
+        max_session_permit=concurrency,
+        rate_limiter=RateLimiter(
+            base_delay=(1.0, 2.0),          # polite random pause between requests
+            max_delay=30.0,                 # backoff ceiling
+            max_retries=3,
+            rate_limit_codes=[429, 503],    # slow down when the server pushes back
+        ),
+    )
 
     total = len(urls)
+    done = 0
     pages: list[CrawledPage] = []
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        for index, url in enumerate(urls, start=1):
-            result = await crawler.arun(url=url, config=run_config)
+        async for result in await crawler.arun_many(
+            list(urls), config=run_config, dispatcher=dispatcher
+        ):
+            done += 1
             if result.success:
                 pages.append(CrawledPage(url=result.url, markdown=str(result.markdown)))
             if on_page is not None:
-                on_page(index, total, url)
+                on_page(done, total, getattr(result, "url", ""))
     return pages
 
 
@@ -80,6 +105,7 @@ def crawl_urls(
     *,
     respect_robots_txt: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
+    concurrency: int = DEFAULT_CONCURRENCY,
     on_page: ProgressCallback | None = None,
 ) -> list[CrawledPage]:
     """Synchronous convenience wrapper around :func:`crawl_urls_async`."""
@@ -88,6 +114,7 @@ def crawl_urls(
             urls,
             respect_robots_txt=respect_robots_txt,
             user_agent=user_agent,
+            concurrency=concurrency,
             on_page=on_page,
         )
     )

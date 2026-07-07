@@ -115,6 +115,11 @@ def test_parser_accepts_qdrant_path_and_embed_model() -> None:
     assert args.qdrant_url == "http://localhost:6333"  # default still present
 
 
+def test_parser_accepts_concurrency() -> None:
+    args = _build_parser().parse_args(["sync", "https://d/", "--concurrency", "12"])
+    assert args.concurrency == 12
+
+
 def test_bfs_enabled_but_no_pages_found() -> None:
     lines: list[str] = []
     code = run_sync(

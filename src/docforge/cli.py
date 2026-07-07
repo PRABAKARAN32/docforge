@@ -21,7 +21,7 @@ from docforge.crawler import DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
 from docforge.discovery import discover_urls
-from docforge.embedder import DEFAULT_MODEL, Embedder
+from docforge.embedder import DEFAULT_DEVICE, DEFAULT_MODEL, Embedder
 from docforge.manifest import Manifest
 from docforge.rag import embed_changes
 from docforge.vectorstore import VectorStore
@@ -37,6 +37,7 @@ def run_sync(
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
     embed_model: str = DEFAULT_MODEL,
+    device: str = DEFAULT_DEVICE,
     discover=discover_urls,
     crawl: Crawler = crawl_urls,
     embedder: Embedder | None = None,
@@ -81,7 +82,7 @@ def run_sync(
             to_embed = len(report.new) + len(report.changed)
             out(f"Embedding {to_embed} changed page(s) into the vector store ...")
             if not _embed_into_store(
-                result, qdrant_url, qdrant_path, embed_model, embedder, store, out
+                result, qdrant_url, qdrant_path, embed_model, device, embedder, store, out
             ):
                 return 1
 
@@ -92,14 +93,15 @@ def run_sync(
 
 
 def _embed_into_store(
-    result, qdrant_url, qdrant_path, embed_model, embedder, store, out
+    result, qdrant_url, qdrant_path, embed_model, device, embedder, store, out
 ) -> bool:
     """Embed changes into the vector store; return False (with a helpful message) on error."""
     try:
         if embedder is None:
             from docforge.embedder import FastEmbedEmbedder
 
-            embedder = FastEmbedEmbedder(embed_model)
+            embedder = FastEmbedEmbedder(embed_model, device=device)
+            out(f"  (embedding device: {embedder.device})")
         if store is None:
             from docforge.vectorstore import QdrantVectorStore
 
@@ -195,6 +197,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"How many pages to crawl in parallel (default: {DEFAULT_CONCURRENCY}). "
         "Higher is faster but heavier on the target server.",
     )
+    sync.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default=DEFAULT_DEVICE,
+        help="Embedding compute device: auto (GPU if available, else CPU), cpu, or cuda "
+        f"(default: {DEFAULT_DEVICE}). Falls back to CPU if a GPU isn't usable.",
+    )
     return parser
 
 
@@ -211,6 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
             embed_model=args.embed_model,
+            device=args.device,
             crawl=_make_progress_crawl(args.concurrency),
         )
     return 1

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from docforge.embedder import Embedder
+from docforge.embedder import Embedder, _want_cuda
 
 _MODEL_TESTS = os.getenv("DOCFORGE_MODEL_TESTS")
 
@@ -37,6 +37,30 @@ def test_embed_returns_one_vector_per_text_of_the_right_dimension() -> None:
     vectors = emb.embed(["a", "bb", "ccc"])
     assert len(vectors) == 3
     assert all(len(v) == emb.dimension for v in vectors)
+
+
+def test_want_cuda_device_logic() -> None:
+    # cpu: never; cuda: always attempt (fallback handled at construction); auto: only if available
+    assert _want_cuda("cpu", cuda_available=True) is False
+    assert _want_cuda("cpu", cuda_available=False) is False
+    assert _want_cuda("cuda", cuda_available=False) is True
+    assert _want_cuda("cuda", cuda_available=True) is True
+    assert _want_cuda("auto", cuda_available=True) is True
+    assert _want_cuda("auto", cuda_available=False) is False
+
+
+def test_want_cuda_rejects_unknown_device() -> None:
+    with pytest.raises(ValueError, match="unknown device"):
+        _want_cuda("tpu", cuda_available=True)
+
+
+@pytest.mark.skipif(not _MODEL_TESTS, reason="set DOCFORGE_MODEL_TESTS=1 (downloads a model)")
+def test_fastembed_device_falls_back_to_cpu_without_gpu() -> None:
+    from docforge.embedder import FastEmbedEmbedder
+
+    # This machine has no GPU: auto and forced-cpu both end up on CPU (no crash).
+    assert FastEmbedEmbedder(device="cpu").device == "cpu"
+    assert FastEmbedEmbedder(device="auto").device == "cpu"
 
 
 @pytest.mark.skipif(not _MODEL_TESTS, reason="set DOCFORGE_MODEL_TESTS=1 (downloads a model)")

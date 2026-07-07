@@ -6,6 +6,8 @@ tiny fake, so the full sync path runs with no Docker and no model download.
 
 from collections.abc import Sequence
 
+import pytest
+
 from docforge.cli import _build_parser, run_sync
 from docforge.crawler import CrawledPage
 from docforge.manifest import Manifest
@@ -118,6 +120,16 @@ def test_parser_accepts_qdrant_path_and_embed_model() -> None:
 def test_parser_accepts_concurrency() -> None:
     args = _build_parser().parse_args(["sync", "https://d/", "--concurrency", "12"])
     assert args.concurrency == 12
+
+
+def test_parser_accepts_device() -> None:
+    args = _build_parser().parse_args(["sync", "https://d/", "--device", "cpu"])
+    assert args.device == "cpu"
+
+
+def test_parser_rejects_unknown_device() -> None:
+    with pytest.raises(SystemExit):  # argparse choices= rejects invalid values
+        _build_parser().parse_args(["sync", "https://d/", "--device", "tpu"])
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

@@ -1,0 +1,21 @@
+# The vector database DocForge embeds documentation chunks into (M2).
+# Qdrant runs as an open-source container; a named volume keeps the vectors
+# persistent across restarts (like the SQLite manifest keeps hashes).
+#
+#   docker compose up -d      # start Qdrant in the background
+#   docker compose down       # stop it (data survives in the volume)
+#   docker compose down -v    # stop AND wipe the vectors (fresh start)
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    container_name: docforge-qdrant
+    ports:
+      - "6333:6333" # REST + web dashboard
+      - "6334:6334" # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:

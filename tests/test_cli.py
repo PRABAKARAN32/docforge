@@ -4,12 +4,21 @@ The vector store is a real in-process Qdrant (`location=":memory:"`) and the emb
 tiny fake, so the full sync path runs with no Docker and no model download.
 """
 
+import os
 from collections.abc import Sequence
 
 import pytest
 
 from docforge.chunking import Chunk
-from docforge.cli import _build_parser, run_diff, run_remove, run_search, run_status, run_sync
+from docforge.cli import (
+    _build_parser,
+    _load_dotenv,
+    run_diff,
+    run_remove,
+    run_search,
+    run_status,
+    run_sync,
+)
 from docforge.crawler import CrawledPage
 from docforge.manifest import Manifest
 from docforge.vectorstore import QdrantVectorStore
@@ -120,7 +129,7 @@ def test_parser_accepts_qdrant_path_and_embed_model() -> None:
     )
     assert args.qdrant_path == "./vec"
     assert args.embed_model == "BAAI/bge-base-en-v1.5"
-    assert args.qdrant_url == "http://localhost:6333"  # default still present
+    assert args.qdrant_url is None  # parser default is None; main resolves flag>env>localhost
 
 
 def test_parser_accepts_concurrency() -> None:
@@ -268,6 +277,57 @@ def test_remove_unknown_kb_is_a_noop(tmp_path) -> None:
     code = run_remove("nope", db_path=db, store=memory_store(), out=lines.append)
     assert code == 0
     assert any("No knowledge base named" in line for line in lines)
+
+
+def test_remove_without_name_or_all_errors() -> None:
+    lines: list[str] = []
+    code = run_remove(None, db_path=":memory:", store=memory_store(), out=lines.append)
+    assert code == 1
+    assert any("--all" in line for line in lines)
+
+
+def test_remove_all_wipes_manifest_and_deletes_db(tmp_path) -> None:
+    db = str(tmp_path / "d.db")
+    store = memory_store()
+    store.ensure_collection(4)
+    with Manifest(db) as m:
+        m.upsert_page("docker", "https://d/x", "h1")
+        m.upsert_page("nginx", "https://n/y", "h2")
+    lines: list[str] = []
+
+    code = run_remove(remove_all=True, db_path=db, store=store, out=lines.append)
+
+    assert code == 0
+    assert not os.path.exists(db)  # the manifest DB file is deleted
+    assert any("Removed everything" in line for line in lines)
+
+
+def test_parser_remove_accepts_name_or_all() -> None:
+    assert _build_parser().parse_args(["remove", "docker"]).name == "docker"
+    all_args = _build_parser().parse_args(["remove", "--all"])
+    assert all_args.name is None
+    assert all_args.remove_all is True
+
+
+# --- .env loading ---
+
+def test_load_dotenv_sets_missing_but_not_existing(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# a comment\n"
+        'QDRANT_URL="https://x.cloud.qdrant.io:6333"\n'
+        "export DOCFORGE_DB=SqlDB/docforge.db\n"
+        "QDRANT_API_KEY=from_file\n"
+    )
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    monkeypatch.delenv("DOCFORGE_DB", raising=False)
+    monkeypatch.setenv("QDRANT_API_KEY", "real_env")  # a real env var must WIN over .env
+
+    _load_dotenv(str(env_file))
+
+    assert os.environ["QDRANT_URL"] == "https://x.cloud.qdrant.io:6333"  # quotes stripped
+    assert os.environ["DOCFORGE_DB"] == "SqlDB/docforge.db"  # export prefix handled
+    assert os.environ["QDRANT_API_KEY"] == "real_env"  # existing env not overridden
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

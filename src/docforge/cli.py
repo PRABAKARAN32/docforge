@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from collections.abc import Sequence
 
@@ -32,6 +33,32 @@ from docforge.vectorstore import VectorStore
 # Sentinel so callers/tests can pass conditional=None explicitly (disable) vs. not passing it
 # (resolve from the --conditional/--force flags).
 _UNSET = object()
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Load ``KEY=VALUE`` lines from a ``.env`` file into the environment (dependency-free).
+
+    Existing environment variables win, so a real ``export`` overrides ``.env``. Blank lines,
+    ``#`` comments, an optional ``export`` prefix, and surrounding quotes are handled.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return  # no .env file -> nothing to load
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = line.removeprefix("export ").strip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
 
 # Colorful help via rich-argparse, with a plain fallback if it isn't installed. It preserves
 # the raw examples epilog and auto-disables color when output isn't a terminal (pipes/CI).
@@ -336,8 +363,9 @@ def run_search(
 
 
 def run_remove(
-    name: str,
+    name: str | None = None,
     *,
+    remove_all: bool = False,
     db_path: str = "docforge.db",
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
@@ -346,10 +374,18 @@ def run_remove(
     store: VectorStore | None = None,
     out=print,
 ) -> int:
-    """Remove an entire knowledge base: its manifest pages and its Qdrant collection.
+    """Remove one knowledge base by ``name``, or ``--all`` to wipe everything.
 
-    ``name`` is the knowledge base name (see ``docforge status`` / ``list``).
+    A single KB drops its manifest pages + its Qdrant collection. ``--all`` drops every KB's
+    collection AND deletes the manifest DB file (and the embedded vectors folder, if used).
     """
+    if remove_all:
+        return _remove_all(db_path, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, store, out)
+
+    if not name:
+        out("Specify a knowledge base name (see `docforge status`), or --all to remove everything.")
+        return 1
+
     with Manifest(db_path) as manifest:
         if name not in manifest.names():
             out(f"No knowledge base named {name!r}. Run `docforge status` to list them.")
@@ -368,6 +404,35 @@ def run_remove(
         removed = manifest.delete_kb(name)
 
     out(f"Removed knowledge base {name!r} ({removed} pages + its vectors).")
+    return 0
+
+
+def _remove_all(db_path, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, store, out) -> int:
+    """Wipe everything: every KB's collection + the manifest DB file (+ embedded vectors)."""
+    with Manifest(db_path) as manifest:
+        kbs = list(manifest.names())
+
+    try:
+        if qdrant_path is not None:
+            # Embedded: the whole folder holds all collections -> remove it in one shot.
+            if os.path.isdir(qdrant_path):
+                shutil.rmtree(qdrant_path)
+        else:
+            for kb_name in kbs:
+                bound = store if store is not None else _open_store(
+                    qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, kb_name
+                )
+                bound.delete_collection()
+    except Exception as exc:  # noqa: BLE001 -- vector store may be down; report cleanly
+        out(f"Vector store error: {exc}")
+        out(_store_error_hint(qdrant_url, qdrant_path))
+        return 1
+
+    # Delete the manifest DB file (skip in-memory / missing).
+    if db_path != ":memory:" and os.path.exists(db_path):
+        os.remove(db_path)
+
+    out(f"Removed everything: {len(kbs)} knowledge base(s) + the manifest at {db_path}.")
     return 0
 
 
@@ -442,8 +507,9 @@ def _add_crawling_flags(sub: argparse.ArgumentParser) -> None:
 def _add_detection_flags(sub: argparse.ArgumentParser) -> None:
     group = sub.add_argument_group("change detection")
     group.add_argument(
-        "--db", default="docforge.db", metavar="PATH",
-        help="Path to the manifest database file, storing page hashes (default: docforge.db).",
+        "--db", default=None, metavar="PATH",
+        help="Path to the manifest database file, storing page hashes "
+        "(default: DOCFORGE_DB env var, else docforge.db).",
     )
     group.add_argument(
         "--conditional", choices=["auto", "on", "off"], default="auto",
@@ -459,9 +525,9 @@ def _add_detection_flags(sub: argparse.ArgumentParser) -> None:
 def _add_vector_store_flags(sub: argparse.ArgumentParser) -> None:
     group = sub.add_argument_group("vector store")
     group.add_argument(
-        "--qdrant-url", default="http://localhost:6333", metavar="URL",
+        "--qdrant-url", default=None, metavar="URL",
         help="Qdrant server URL: Docker container, native install, or remote "
-        "(default: http://localhost:6333).",
+        "(default: QDRANT_URL env var, else http://localhost:6333).",
     )
     group.add_argument(
         "--qdrant-path", default=None, metavar="DIR",
@@ -553,8 +619,8 @@ def _build_parser() -> argparse.ArgumentParser:
             formatter_class=_HelpFormatter,
         )
         sub.add_argument(
-            "--db", default="docforge.db", metavar="PATH",
-            help="Manifest database file to inspect (default: docforge.db).",
+            "--db", default=None, metavar="PATH",
+            help="Manifest database file to inspect (default: DOCFORGE_DB env var, else docforge.db).",
         )
 
     # search -- query one or all knowledge bases
@@ -577,8 +643,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=5, metavar="N", help="Number of results (default: 5).",
     )
     search.add_argument(
-        "--db", default="docforge.db", metavar="PATH",
-        help="Manifest database file (used to list knowledge bases; default: docforge.db).",
+        "--db", default=None, metavar="PATH",
+        help="Manifest database file (used to list KBs for --all; default: DOCFORGE_DB, else docforge.db).",
     )
     _add_vector_store_flags(search)
     _add_embedding_flags(search)
@@ -586,15 +652,22 @@ def _build_parser() -> argparse.ArgumentParser:
     # remove -- drop a whole knowledge base
     remove = subparsers.add_parser(
         "remove",
-        help="Remove a whole knowledge base (its manifest pages and its Qdrant collection).",
-        description="Delete a knowledge base by name: its pages in the manifest and its "
-        "collection in the vector store. See `docforge status` for the names.",
+        help="Remove a knowledge base (or --all): its manifest pages and its Qdrant collection.",
+        description="Delete a knowledge base by name (its manifest pages + its vector-store "
+        "collection), or --all to wipe every knowledge base AND the manifest DB file. See "
+        "`docforge status` for the names.",
         formatter_class=_HelpFormatter,
     )
-    remove.add_argument("name", help="The knowledge base name to remove (e.g. docs_docker_com).")
     remove.add_argument(
-        "--db", default="docforge.db", metavar="PATH",
-        help="Manifest database file (default: docforge.db).",
+        "name", nargs="?", help="The knowledge base name to remove (e.g. docs_docker_com).",
+    )
+    remove.add_argument(
+        "--all", action="store_true", dest="remove_all",
+        help="Remove EVERYTHING: all collections + the manifest DB file (and embedded vectors).",
+    )
+    remove.add_argument(
+        "--db", default=None, metavar="PATH",
+        help="Manifest database file (default: DOCFORGE_DB env var, else docforge.db).",
     )
     _add_vector_store_flags(remove)
 
@@ -602,6 +675,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _load_dotenv()  # let a local .env supply QDRANT_URL / QDRANT_API_KEY / DOCFORGE_DB / QDRANT_PATH
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -609,7 +683,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    # API key: the --qdrant-api-key flag overrides the QDRANT_API_KEY env var (the secure default).
+    # Config resolution, in precedence order: explicit flag > .env/env var > built-in default.
+    db_path = getattr(args, "db", None) or os.getenv("DOCFORGE_DB") or "docforge.db"
+    qdrant_url = getattr(args, "qdrant_url", None) or os.getenv("QDRANT_URL") or "http://localhost:6333"
+    qdrant_path = getattr(args, "qdrant_path", None) or os.getenv("QDRANT_PATH")
     api_key = getattr(args, "qdrant_api_key", None) or os.getenv("QDRANT_API_KEY")
     timeout = getattr(args, "qdrant_timeout", 60.0)
 
@@ -621,12 +698,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_sync(
             args.url,
             name=args.name,
-            db_path=args.db,
+            db_path=db_path,
             allow_bfs=args.bfs,
             max_pages=args.max_pages,
             dry_run=args.dry_run,
-            qdrant_url=args.qdrant_url,
-            qdrant_path=args.qdrant_path,
+            qdrant_url=qdrant_url,
+            qdrant_path=qdrant_path,
             qdrant_api_key=api_key,
             qdrant_timeout=timeout,
             embed_model=args.embed_model,
@@ -639,7 +716,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_diff(
             args.url,
             name=args.name,
-            db_path=args.db,
+            db_path=db_path,
             allow_bfs=args.bfs,
             max_pages=args.max_pages,
             conditional_mode=args.conditional,
@@ -647,15 +724,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             crawl=crawl,
         )
     if args.command in ("status", "list"):
-        return run_status(db_path=args.db)
+        return run_status(db_path=db_path)
     if args.command == "search":
         return run_search(
             args.query,
             name=args.name,
             search_all=args.search_all,
-            db_path=args.db,
-            qdrant_url=args.qdrant_url,
-            qdrant_path=args.qdrant_path,
+            db_path=db_path,
+            qdrant_url=qdrant_url,
+            qdrant_path=qdrant_path,
             qdrant_api_key=api_key,
             qdrant_timeout=timeout,
             embed_model=args.embed_model,
@@ -665,9 +742,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "remove":
         return run_remove(
             args.name,
-            db_path=args.db,
-            qdrant_url=args.qdrant_url,
-            qdrant_path=args.qdrant_path,
+            remove_all=args.remove_all,
+            db_path=db_path,
+            qdrant_url=qdrant_url,
+            qdrant_path=qdrant_path,
             qdrant_api_key=api_key,
             qdrant_timeout=timeout,
         )

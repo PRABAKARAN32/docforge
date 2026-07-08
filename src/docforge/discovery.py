@@ -19,6 +19,7 @@ drag in the heavy browser stack.
 
 from __future__ import annotations
 
+import re
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -34,6 +35,17 @@ Fetcher = Callable[[str], str]
 LinkFetcher = Callable[[str], list[str]]
 
 DEFAULT_USER_AGENT = "DocForge/0.1 (documentation sync bot; +https://github.com/DocForge)"
+
+
+def derive_kb_name(url: str) -> str:
+    """Derive a default knowledge-base / collection name from a URL's host.
+
+    ``https://docs.docker.com/`` -> ``docs_docker_com``. Sanitized to a safe collection name
+    (lowercase, ``[a-z0-9_]``), so it's valid for both SQLite scoping and Qdrant.
+    """
+    host = urlparse(url).netloc or url
+    name = re.sub(r"[^a-z0-9]+", "_", host.lower()).strip("_")
+    return name or "docs"
 
 
 def _localname(tag: str) -> str:

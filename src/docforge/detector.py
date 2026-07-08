@@ -89,10 +89,13 @@ def detect_changes(
     urls: Sequence[str],
     manifest: Manifest,
     *,
+    name: str = "default",
     crawl: Crawler = crawl_urls,
     conditional: ConditionalFetcher | None = None,
 ) -> ChangeDetectionResult:
     """Crawl ``urls``, fingerprint them, and diff against the manifest. No mutation.
+
+    ``name`` is the knowledge base being synced -- the manifest is compared/scoped to it.
 
     If ``conditional`` is given, a cheap HTTP pre-check first skips pages the server reports
     as unchanged (304), so only new/changed pages are browser-crawled.
@@ -101,8 +104,8 @@ def detect_changes(
     means some pages failed, so downstream deletion is suppressed (Decision 5.5) -- we never
     treat a failed fetch as "the page was deleted." 304-skipped pages count as present.
     """
-    previous_hashes = manifest.hashes()
-    stored_validators = manifest.validators()
+    previous_hashes = manifest.hashes(name)
+    stored_validators = manifest.validators(name)
 
     to_crawl, unchanged_304, precheck_saw_validators = _preselect(
         urls, previous_hashes, stored_validators, conditional
@@ -137,8 +140,8 @@ def detect_changes(
     )
 
 
-def apply_changes(manifest: Manifest, result: ChangeDetectionResult) -> None:
-    """Persist a detection result into the manifest.
+def apply_changes(manifest: Manifest, result: ChangeDetectionResult, *, name: str = "default") -> None:
+    """Persist a detection result into knowledge base ``name`` in the manifest.
 
     Upserts the hash of every new/changed page (with any fresh HTTP validators), and removes
     deleted pages -- but only the deletions that are safe to apply given whether the crawl
@@ -148,8 +151,8 @@ def apply_changes(manifest: Manifest, result: ChangeDetectionResult) -> None:
     for url in result.report.new | result.report.changed:
         etag, last_modified = result.new_validators.get(url, (None, None))
         manifest.upsert_page(
-            url, result.current_hashes[url], etag=etag, last_modified=last_modified
+            name, url, result.current_hashes[url], etag=etag, last_modified=last_modified
         )
 
     for url in deletions_to_apply(result.report, crawl_succeeded=result.crawl_succeeded):
-        manifest.delete_page(url)
+        manifest.delete_page(name, url)

@@ -23,7 +23,7 @@ from docforge.conditional import http_conditional_get
 from docforge.crawler import DEFAULT_BASE_DELAY, DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
-from docforge.discovery import discover_urls
+from docforge.discovery import derive_kb_name, discover_urls
 from docforge.embedder import DEFAULT_DEVICE, DEFAULT_MODEL, Embedder
 from docforge.manifest import Manifest
 from docforge.rag import embed_changes
@@ -52,17 +52,20 @@ def _open_store(
     qdrant_path: str | None,
     api_key: str | None = None,
     timeout: float = 60.0,
+    collection: str = "docforge",
 ):
-    """Open the Qdrant store: embedded (--qdrant-path) if given, else the server URL.
+    """Open the Qdrant store for ``collection`` (one per knowledge base).
 
-    ``api_key`` authenticates to a remote/managed Qdrant (e.g. Qdrant Cloud); ``timeout``
-    (seconds) covers server requests. Both are ignored in embedded (path) mode.
+    Embedded (--qdrant-path) if given, else the server URL. ``api_key`` authenticates to a
+    remote/managed Qdrant (e.g. Qdrant Cloud); ``timeout`` (seconds) covers server requests.
     """
     from docforge.vectorstore import QdrantVectorStore
 
     if qdrant_path is not None:
-        return QdrantVectorStore(path=qdrant_path)
-    return QdrantVectorStore(url=qdrant_url, api_key=api_key, timeout=timeout)
+        return QdrantVectorStore(path=qdrant_path, collection=collection)
+    return QdrantVectorStore(
+        url=qdrant_url, api_key=api_key, timeout=timeout, collection=collection
+    )
 
 
 def _store_error_hint(qdrant_url: str, qdrant_path: str | None) -> str:
@@ -80,6 +83,7 @@ def _store_error_hint(qdrant_url: str, qdrant_path: str | None) -> str:
 def run_sync(
     seed_url: str,
     *,
+    name: str | None = None,
     db_path: str = "docforge.db",
     allow_bfs: bool = False,
     max_pages: int | None = None,
@@ -103,6 +107,8 @@ def run_sync(
 
     Returns a process exit code (0 = success, 1 = nothing to do / no pages / vector-store error).
     """
+    kb_name = name or derive_kb_name(seed_url)
+    out(f"Knowledge base: {kb_name}")
     out(f"Discovering pages for {seed_url} ...")
     urls = discover(seed_url, allow_bfs=allow_bfs, max_pages=max_pages)
 
@@ -128,13 +134,13 @@ def run_sync(
         if not dry_run:
             prepared = _prepare_store(
                 embedder, store, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
-                embed_model, device, out,
+                embed_model, device, kb_name, out,
             )
             if prepared is None:
                 return 1
             embedder, store = prepared
 
-        result = detect_changes(urls, manifest, crawl=crawl, conditional=conditional)
+        result = detect_changes(urls, manifest, name=kb_name, crawl=crawl, conditional=conditional)
         report = result.report
 
         if conditional is not None:
@@ -167,7 +173,7 @@ def run_sync(
             if not _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out):
                 return 1
 
-        apply_changes(manifest, result)
+        apply_changes(manifest, result, name=kb_name)
         out("Manifest updated.")
 
     return 0
@@ -175,7 +181,7 @@ def run_sync(
 
 def _prepare_store(
     embedder, store, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
-    embed_model, device, out,
+    embed_model, device, collection, out,
 ):
     """Build the embedder + open the vector store and confirm it's reachable, BEFORE crawling.
 
@@ -189,7 +195,9 @@ def _prepare_store(
             embedder = FastEmbedEmbedder(embed_model, device=device)
             out(f"  (embedding device: {embedder.device})")
         if store is None:
-            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
+            store = _open_store(
+                qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, collection
+            )
         # ensure_collection makes a real round-trip -> proves the store is reachable/writable now.
         store.ensure_collection(embedder.dimension)
     except Exception as exc:  # noqa: BLE001 -- surface store/model failure as a clean message
@@ -213,6 +221,7 @@ def _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out) -> 
 def run_diff(
     seed_url: str,
     *,
+    name: str | None = None,
     db_path: str = "docforge.db",
     allow_bfs: bool = False,
     max_pages: int | None = None,
@@ -224,6 +233,8 @@ def run_diff(
     out=print,
 ) -> int:
     """Preview what would change on a site: crawl + detect, list the changes, write nothing."""
+    kb_name = name or derive_kb_name(seed_url)
+    out(f"Knowledge base: {kb_name}")
     out(f"Discovering pages for {seed_url} ...")
     urls = discover(seed_url, allow_bfs=allow_bfs, max_pages=max_pages)
     if not urls:
@@ -235,7 +246,7 @@ def run_diff(
         conditional = http_conditional_get if (not force and conditional_mode != "off") else None
 
     with Manifest(db_path) as manifest:
-        result = detect_changes(urls, manifest, crawl=crawl, conditional=conditional)
+        result = detect_changes(urls, manifest, name=kb_name, crawl=crawl, conditional=conditional)
         report = result.report
 
     for url in sorted(report.new):
@@ -252,30 +263,27 @@ def run_diff(
 
 
 def run_status(*, db_path: str = "docforge.db", out=print) -> int:
-    """Show what the manifest is tracking: total pages, broken down by site (host)."""
-    from urllib.parse import urlparse
-
+    """List the knowledge bases in the manifest, with page counts."""
     with Manifest(db_path) as manifest:
-        urls = manifest.hashes()
+        kbs = manifest.names()
 
-    if not urls:
-        out(f"No pages tracked in {db_path}.")
+    if not kbs:
+        out(f"No knowledge bases tracked in {db_path}.")
         return 0
 
-    per_host: dict[str, int] = {}
-    for url in urls:
-        host = urlparse(url).netloc or "?"
-        per_host[host] = per_host.get(host, 0) + 1
-
-    out(f"{len(urls)} pages tracked in {db_path}, across {len(per_host)} site(s):")
-    for host, count in sorted(per_host.items()):
-        out(f"  {count:6d}  {host}")
+    total = sum(kbs.values())
+    out(f"{total} pages across {len(kbs)} knowledge base(s) in {db_path}:")
+    for kb_name, count in sorted(kbs.items()):
+        out(f"  {count:6d}  {kb_name}")
     return 0
 
 
 def run_search(
     query: str,
     *,
+    name: str | None = None,
+    search_all: bool = False,
+    db_path: str = "docforge.db",
     qdrant_url: str = "http://localhost:6333",
     qdrant_path: str | None = None,
     qdrant_api_key: str | None = None,
@@ -287,16 +295,31 @@ def run_search(
     store: VectorStore | None = None,
     out=print,
 ) -> int:
-    """Search the knowledge base: embed the query and print the closest chunks."""
+    """Search one knowledge base (--name) or all of them (default / --all)."""
     try:
         if embedder is None:
             from docforge.embedder import FastEmbedEmbedder
 
             embedder = FastEmbedEmbedder(embed_model, device=device)
-        if store is None:
-            store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
         vector = embedder.embed([query])[0]
-        hits = store.search(vector, limit=limit)
+
+        if store is not None:
+            hits = list(store.search(vector, limit=limit))
+        else:
+            if name and not search_all:
+                collections = [name]
+            else:
+                with Manifest(db_path) as manifest:
+                    collections = sorted(manifest.names())
+                if not collections:
+                    out("No knowledge bases yet -- run `docforge sync <url>` first.")
+                    return 0
+            hits = []
+            for collection in collections:
+                bound = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, collection)
+                hits.extend(bound.search(vector, limit=limit))
+            hits.sort(key=lambda hit: hit.score, reverse=True)
+            hits = hits[:limit]
     except Exception as exc:  # noqa: BLE001 -- clean message instead of a traceback
         out(f"Search failed: {exc}")
         out(_store_error_hint(qdrant_url, qdrant_path))
@@ -313,7 +336,7 @@ def run_search(
 
 
 def run_remove(
-    site: str,
+    name: str,
     *,
     db_path: str = "docforge.db",
     qdrant_url: str = "http://localhost:6333",
@@ -323,30 +346,28 @@ def run_remove(
     store: VectorStore | None = None,
     out=print,
 ) -> int:
-    """Remove a site's pages from the manifest and its chunks from the vector store.
+    """Remove an entire knowledge base: its manifest pages and its Qdrant collection.
 
-    ``site`` matches any tracked URL that contains it (e.g. a host like ``docs.example.com``).
+    ``name`` is the knowledge base name (see ``docforge status`` / ``list``).
     """
     with Manifest(db_path) as manifest:
-        matching = [url for url in manifest.hashes() if site in url]
-        if not matching:
-            out(f"No tracked pages match {site!r}.")
+        if name not in manifest.names():
+            out(f"No knowledge base named {name!r}. Run `docforge status` to list them.")
             return 0
 
         try:
-            if store is None:
-                store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
-            for url in matching:
-                store.delete_by_source_url(url)
+            bound = store if store is not None else _open_store(
+                qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, name
+            )
+            bound.delete_collection()
         except Exception as exc:  # noqa: BLE001 -- vector store may be down; report cleanly
             out(f"Vector store error: {exc}")
             out(_store_error_hint(qdrant_url, qdrant_path))
             return 1
 
-        for url in matching:
-            manifest.delete_page(url)
+        removed = manifest.delete_kb(name)
 
-    out(f"Removed {len(matching)} page(s) matching {site!r} (manifest + vector store).")
+    out(f"Removed knowledge base {name!r} ({removed} pages + its vectors).")
     return 0
 
 
@@ -472,6 +493,14 @@ def _add_embedding_flags(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_name_flag(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--name", default=None, metavar="NAME",
+        help="Knowledge base name -- its own manifest scope + Qdrant collection. "
+        "Default: derived from the site's host (e.g. docs.docker.com -> docs_docker_com).",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docforge",
@@ -493,6 +522,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
     sync.add_argument("url", help="The documentation site URL to sync.")
+    _add_name_flag(sync)
     _add_crawling_flags(sync)
     _add_detection_flags(sync)
     _add_vector_store_flags(sync)
@@ -511,44 +541,57 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
     diff.add_argument("url", help="The documentation site URL to check.")
+    _add_name_flag(diff)
     _add_crawling_flags(diff)
     _add_detection_flags(diff)
 
-    # status -- what the manifest tracks
-    status = subparsers.add_parser(
-        "status",
-        help="Show what the manifest is tracking (pages per site).",
-        formatter_class=_HelpFormatter,
-    )
-    status.add_argument(
-        "--db", default="docforge.db", metavar="PATH",
-        help="Manifest database file to inspect (default: docforge.db).",
-    )
+    # status / list -- the knowledge bases tracked (aliases)
+    for command in ("status", "list"):
+        sub = subparsers.add_parser(
+            command,
+            help="List the knowledge bases (docs sites) and their page counts.",
+            formatter_class=_HelpFormatter,
+        )
+        sub.add_argument(
+            "--db", default="docforge.db", metavar="PATH",
+            help="Manifest database file to inspect (default: docforge.db).",
+        )
 
-    # search -- query the knowledge base
+    # search -- query one or all knowledge bases
     search = subparsers.add_parser(
         "search",
-        help="Search the knowledge base and print the closest chunks.",
-        description="Embed a query and return the most similar chunks from the vector store, "
-        "with their source page and score.",
+        help="Search a knowledge base and print the closest chunks.",
+        description="Embed a query and return the most similar chunks. Use --name to search one "
+        "knowledge base, or --all (the default) to search across all of them.",
         formatter_class=_HelpFormatter,
     )
     search.add_argument("query", help="What to search for.")
     search.add_argument(
+        "--name", default=None, metavar="NAME", help="Search only this knowledge base.",
+    )
+    search.add_argument(
+        "--all", action="store_true", dest="search_all",
+        help="Search across all knowledge bases (the default when --name is omitted).",
+    )
+    search.add_argument(
         "--limit", type=int, default=5, metavar="N", help="Number of results (default: 5).",
+    )
+    search.add_argument(
+        "--db", default="docforge.db", metavar="PATH",
+        help="Manifest database file (used to list knowledge bases; default: docforge.db).",
     )
     _add_vector_store_flags(search)
     _add_embedding_flags(search)
 
-    # remove -- drop a site from the KB
+    # remove -- drop a whole knowledge base
     remove = subparsers.add_parser(
         "remove",
-        help="Remove a site's pages from the manifest and its chunks from the vector store.",
-        description="Delete every tracked page whose URL contains the given text (e.g. a host), "
-        "along with its chunks in the vector store.",
+        help="Remove a whole knowledge base (its manifest pages and its Qdrant collection).",
+        description="Delete a knowledge base by name: its pages in the manifest and its "
+        "collection in the vector store. See `docforge status` for the names.",
         formatter_class=_HelpFormatter,
     )
-    remove.add_argument("site", help="Host or URL substring to remove, e.g. docs.example.com.")
+    remove.add_argument("name", help="The knowledge base name to remove (e.g. docs_docker_com).")
     remove.add_argument(
         "--db", default="docforge.db", metavar="PATH",
         help="Manifest database file (default: docforge.db).",
@@ -577,6 +620,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "sync":
         return run_sync(
             args.url,
+            name=args.name,
             db_path=args.db,
             allow_bfs=args.bfs,
             max_pages=args.max_pages,
@@ -594,6 +638,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "diff":
         return run_diff(
             args.url,
+            name=args.name,
             db_path=args.db,
             allow_bfs=args.bfs,
             max_pages=args.max_pages,
@@ -601,11 +646,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             force=args.force,
             crawl=crawl,
         )
-    if args.command == "status":
+    if args.command in ("status", "list"):
         return run_status(db_path=args.db)
     if args.command == "search":
         return run_search(
             args.query,
+            name=args.name,
+            search_all=args.search_all,
+            db_path=args.db,
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,
             qdrant_api_key=api_key,
@@ -616,7 +664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "remove":
         return run_remove(
-            args.site,
+            args.name,
             db_path=args.db,
             qdrant_url=args.qdrant_url,
             qdrant_path=args.qdrant_path,

@@ -55,6 +55,7 @@ def test_sync_reports_changes_updates_manifest_and_embeds(tmp_path) -> None:
 
     code = run_sync(
         "https://d/",
+        name="docker",
         db_path=db,
         discover=fake_discover(list(site)),
         crawl=fake_crawl(site),
@@ -65,12 +66,13 @@ def test_sync_reports_changes_updates_manifest_and_embeds(tmp_path) -> None:
     )
 
     assert code == 0
+    assert any("Knowledge base: docker" in line for line in lines)
     assert any("Discovered 2 pages." in line for line in lines)
     assert any("2 new" in line for line in lines)
     assert any("Embedding 2 changed page(s)" in line for line in lines)
     assert any("Manifest updated." in line for line in lines)
     with Manifest(db) as m:
-        assert set(m.hashes()) == set(site)
+        assert set(m.hashes("docker")) == set(site)
     assert store.count() > 0  # chunks were embedded into the vector store
 
 
@@ -81,6 +83,7 @@ def test_dry_run_writes_nothing(tmp_path) -> None:
 
     code = run_sync(
         "https://d/",
+        name="docker",
         db_path=db,
         dry_run=True,
         discover=fake_discover(list(site)),
@@ -92,7 +95,7 @@ def test_dry_run_writes_nothing(tmp_path) -> None:
     assert code == 0
     assert any("Dry run: no changes written." in line for line in lines)
     with Manifest(db) as m:
-        assert m.hashes() == {}  # nothing persisted
+        assert m.names() == {}  # nothing persisted
 
 
 def test_no_sitemap_without_bfs_warns_and_exits() -> None:
@@ -168,30 +171,37 @@ def test_parser_supports_all_subcommands() -> None:
     parser = _build_parser()
     assert parser.parse_args(["diff", "https://d/"]).command == "diff"
     assert parser.parse_args(["status"]).command == "status"
+    assert parser.parse_args(["list"]).command == "list"
     assert parser.parse_args(["search", "hello"]).command == "search"
-    assert parser.parse_args(["remove", "d.com"]).command == "remove"
+    assert parser.parse_args(["remove", "docker"]).command == "remove"
 
 
-# --- status ---
+def test_parser_sync_accepts_name() -> None:
+    args = _build_parser().parse_args(["sync", "https://d/", "--name", "docker"])
+    assert args.name == "docker"
+    assert _build_parser().parse_args(["sync", "https://d/"]).name is None
 
-def test_status_reports_pages_per_site(tmp_path) -> None:
+
+# --- status / list ---
+
+def test_status_lists_knowledge_bases(tmp_path) -> None:
     db = str(tmp_path / "d.db")
     with Manifest(db) as m:
-        m.upsert_page("https://a.com/x", "h1")
-        m.upsert_page("https://a.com/y", "h2")
-        m.upsert_page("https://b.com/z", "h3")
+        m.upsert_page("docker", "https://a.com/x", "h1")
+        m.upsert_page("docker", "https://a.com/y", "h2")
+        m.upsert_page("nginx", "https://b.com/z", "h3")
     lines: list[str] = []
 
     assert run_status(db_path=db, out=lines.append) == 0
-    assert any("3 pages tracked" in line for line in lines)
-    assert any("a.com" in line for line in lines)
-    assert any("b.com" in line for line in lines)
+    assert any("3 pages across 2 knowledge base(s)" in line for line in lines)
+    assert any("docker" in line for line in lines)
+    assert any("nginx" in line for line in lines)
 
 
 def test_status_empty_db(tmp_path) -> None:
     lines: list[str] = []
     assert run_status(db_path=str(tmp_path / "empty.db"), out=lines.append) == 0
-    assert any("No pages tracked" in line for line in lines)
+    assert any("No knowledge bases tracked" in line for line in lines)
 
 
 # --- diff ---
@@ -203,6 +213,7 @@ def test_diff_lists_changes_and_writes_nothing(tmp_path) -> None:
 
     code = run_diff(
         "https://d/",
+        name="docker",
         db_path=db,
         discover=fake_discover(list(site)),
         crawl=fake_crawl(site),
@@ -214,7 +225,7 @@ def test_diff_lists_changes_and_writes_nothing(tmp_path) -> None:
     assert any("Would change: 2 new" in line for line in lines)
     assert any("+ new" in line and "https://d/a" in line for line in lines)
     with Manifest(db) as m:
-        assert m.hashes() == {}  # diff never writes
+        assert m.names() == {}  # diff never writes
 
 
 # --- search ---
@@ -233,23 +244,30 @@ def test_search_prints_hits() -> None:
 
 # --- remove ---
 
-def test_remove_deletes_from_manifest_and_store(tmp_path) -> None:
+def test_remove_deletes_a_whole_knowledge_base(tmp_path) -> None:
     db = str(tmp_path / "d.db")
     store = memory_store()
     store.ensure_collection(4)
     with Manifest(db) as m:
-        m.upsert_page("https://a.com/x", "h1")
-        m.upsert_page("https://b.com/y", "h2")
+        m.upsert_page("docker", "https://a.com/x", "h1")
+        m.upsert_page("nginx", "https://b.com/y", "h2")
     store.upsert_chunks([Chunk("https://a.com/x", 0, "t")], [[1.0, 0.0, 0.0, 0.0]])
     lines: list[str] = []
 
-    code = run_remove("a.com", db_path=db, store=store, out=lines.append)
+    code = run_remove("docker", db_path=db, store=store, out=lines.append)
 
     assert code == 0
     with Manifest(db) as m:
-        assert set(m.hashes()) == {"https://b.com/y"}  # a.com removed, b.com kept
-    assert store.count() == 0  # a.com's chunk removed
-    assert any("Removed 1 page" in line for line in lines)
+        assert m.names() == {"nginx": 1}  # docker KB removed, nginx kept
+    assert any("Removed knowledge base 'docker'" in line for line in lines)
+
+
+def test_remove_unknown_kb_is_a_noop(tmp_path) -> None:
+    db = str(tmp_path / "d.db")
+    lines: list[str] = []
+    code = run_remove("nope", db_path=db, store=memory_store(), out=lines.append)
+    assert code == 0
+    assert any("No knowledge base named" in line for line in lines)
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

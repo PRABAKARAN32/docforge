@@ -14,9 +14,16 @@ from docforge.discovery import (
     Fetcher,
     LinkFetcher,
     bfs_discover_urls,
+    derive_kb_name,
     discover_urls,
     parse_sitemap,
 )
+
+
+def test_derive_kb_name_from_host() -> None:
+    assert derive_kb_name("https://docs.docker.com/") == "docs_docker_com"
+    assert derive_kb_name("https://nginx.org/en/docs/") == "nginx_org"
+    assert derive_kb_name("http://EXAMPLE.COM:8080/x") == "example_com_8080"
 
 _NETWORK = os.getenv("DOCFORGE_NETWORK_TESTS")
 

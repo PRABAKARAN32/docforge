@@ -45,6 +45,7 @@ class VectorStore(Protocol):
     def ensure_collection(self, dimension: int) -> None: ...
     def upsert_chunks(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None: ...
     def delete_by_source_url(self, source_url: str) -> None: ...
+    def delete_collection(self) -> None: ...
     def count(self) -> int: ...
     def search(self, vector: Sequence[float], *, limit: int = 5) -> list[SearchHit]: ...
 
@@ -141,6 +142,11 @@ class QdrantVectorStore:
                 )
             ),
         )
+
+    def delete_collection(self) -> None:
+        """Drop the whole collection (used to remove a knowledge base). No-op if absent."""
+        if self._client.collection_exists(self._collection):
+            self._client.delete_collection(self._collection)
 
     def count(self) -> int:
         return self._client.count(self._collection, exact=True).count

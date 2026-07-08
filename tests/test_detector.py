@@ -50,35 +50,35 @@ def test_first_run_marks_everything_new_and_populates_manifest() -> None:
         assert result.crawl_succeeded
 
         apply_changes(m, result)
-        assert set(m.hashes()) == set(site)  # manifest now knows both pages
+        assert set(m.hashes("default")) == set(site)  # manifest now knows both pages
 
 
 def test_second_identical_run_is_a_no_op() -> None:
     site = {"https://d/a": "# A\n\nAlpha."}
     with Manifest(":memory:") as m:
         apply_changes(m, detect_changes(list(site), m, crawl=make_crawler(site)))
-        before = m.hashes()
+        before = m.hashes("default")
 
         result = detect_changes(list(site), m, crawl=make_crawler(site))
         assert result.report.unchanged == frozenset(site)
         assert not result.report.has_content_changes
 
         apply_changes(m, result)
-        assert m.hashes() == before  # nothing written the second time
+        assert m.hashes("default") == before  # nothing written the second time
 
 
 def test_changed_page_is_detected_and_updated() -> None:
     with Manifest(":memory:") as m:
         v1 = {"https://d/a": "# A\n\nOriginal."}
         apply_changes(m, detect_changes(list(v1), m, crawl=make_crawler(v1)))
-        original_hash = m.hashes()["https://d/a"]
+        original_hash = m.hashes("default")["https://d/a"]
 
         v2 = {"https://d/a": "# A\n\nEdited content."}
         result = detect_changes(list(v2), m, crawl=make_crawler(v2))
         assert result.report.changed == frozenset({"https://d/a"})
 
         apply_changes(m, result)
-        assert m.hashes()["https://d/a"] != original_hash  # hash updated
+        assert m.hashes("default")["https://d/a"] != original_hash  # hash updated
 
 
 def test_deleted_page_removed_when_crawl_succeeded() -> None:
@@ -93,7 +93,7 @@ def test_deleted_page_removed_when_crawl_succeeded() -> None:
         assert result.crawl_succeeded
 
         apply_changes(m, result)
-        assert set(m.hashes()) == {"https://d/a"}  # b removed
+        assert set(m.hashes("default")) == {"https://d/a"}  # b removed
 
 
 def test_deletion_guard_keeps_pages_when_crawl_partially_failed() -> None:
@@ -109,7 +109,7 @@ def test_deletion_guard_keeps_pages_when_crawl_partially_failed() -> None:
         assert not result.crawl_succeeded  # asked for 2, got 1
 
         apply_changes(m, result)
-        assert set(m.hashes()) == {"https://d/a", "https://d/b"}  # b preserved
+        assert set(m.hashes("default")) == {"https://d/a", "https://d/b"}  # b preserved
 
 
 # --- conditional (304) pre-check ---
@@ -173,4 +173,4 @@ def test_new_validators_are_captured_from_the_crawl_and_stored() -> None:
         assert result.conditional_supported is True
         assert result.new_validators["https://d/a"] == ('"E1"', "Mon")
         apply_changes(m, result)
-        assert m.validators()["https://d/a"] == ('"E1"', "Mon")
+        assert m.validators("default")["https://d/a"] == ('"E1"', "Mon")

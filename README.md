@@ -69,13 +69,24 @@ docforge sync <url> --force                       # ignore ETag/304, re-crawl ev
 On re-syncs of sites that send `ETag`/`Last-Modified`, DocForge uses HTTP conditional requests to
 **skip re-crawling unchanged pages entirely** (a tiny request instead of a full browser render).
 
+### Multiple docs sites (named knowledge bases)
+
+Each site can live in its own **named knowledge base** (a separate Qdrant collection), so
+they're isolated and independently searchable. The name defaults to the host, or set `--name`:
+
+```bash
+docforge sync https://docs.docker.com/   --name docker
+docforge sync https://nginx.org/en/docs/ --name nginx --bfs
+```
+
 ### Other commands
 
 ```bash
 docforge diff <url>                 # preview what would change (write nothing)
-docforge status                     # show what's tracked, per site
-docforge search "<query>"           # search the knowledge base
-docforge remove <host>              # drop a site (manifest + vectors)
+docforge status                     # list knowledge bases and their page counts
+docforge search "<query>" --name docker   # search one knowledge base
+docforge search "<query>" --all            # search across all of them
+docforge remove docker              # drop a whole knowledge base (manifest + vectors)
 ```
 
 Run `docforge --help` (or `docforge <command> --help`) for all options.

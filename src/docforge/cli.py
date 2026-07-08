@@ -122,6 +122,18 @@ def run_sync(
         conditional = http_conditional_get if use_conditional else None
 
     with Manifest(db_path) as manifest:
+        # Fail-fast: confirm the vector store is reachable BEFORE the expensive crawl+embed,
+        # so a bad URL / API key / down cluster doesn't waste a long crawl. (Skipped for
+        # --dry-run, which never writes.)
+        if not dry_run:
+            prepared = _prepare_store(
+                embedder, store, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
+                embed_model, device, out,
+            )
+            if prepared is None:
+                return 1
+            embedder, store = prepared
+
         result = detect_changes(urls, manifest, crawl=crawl, conditional=conditional)
         report = result.report
 
@@ -152,10 +164,7 @@ def run_sync(
         if needs_store:
             to_embed = len(report.new) + len(report.changed)
             out(f"Embedding {to_embed} changed page(s) into the vector store ...")
-            if not _embed_into_store(
-                result, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
-                embed_model, device, embedder, store, out,
-            ):
+            if not _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out):
                 return 1
 
         apply_changes(manifest, result)
@@ -164,11 +173,15 @@ def run_sync(
     return 0
 
 
-def _embed_into_store(
-    result, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
-    embed_model, device, embedder, store, out,
-) -> bool:
-    """Embed changes into the vector store; return False (with a helpful message) on error."""
+def _prepare_store(
+    embedder, store, qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout,
+    embed_model, device, out,
+):
+    """Build the embedder + open the vector store and confirm it's reachable, BEFORE crawling.
+
+    This is the fail-fast: a bad URL / API key / down cluster errors here in seconds, instead
+    of after a long crawl+embed. Returns (embedder, store) or None (after printing why) on error.
+    """
     try:
         if embedder is None:
             from docforge.embedder import FastEmbedEmbedder
@@ -177,8 +190,20 @@ def _embed_into_store(
             out(f"  (embedding device: {embedder.device})")
         if store is None:
             store = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout)
+        # ensure_collection makes a real round-trip -> proves the store is reachable/writable now.
+        store.ensure_collection(embedder.dimension)
+    except Exception as exc:  # noqa: BLE001 -- surface store/model failure as a clean message
+        out(f"Vector store error: {exc}")
+        out(_store_error_hint(qdrant_url, qdrant_path))
+        return None
+    return embedder, store
+
+
+def _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out) -> bool:
+    """Embed changes into the (already-prepared) vector store; False + message on error."""
+    try:
         embed_changes(result, embedder, store)
-    except Exception as exc:  # noqa: BLE001 -- surface any store/model failure as a clean message
+    except Exception as exc:  # noqa: BLE001 -- surface any store failure as a clean message
         out(f"Vector store error: {exc}")
         out(_store_error_hint(qdrant_url, qdrant_path))
         return False

@@ -44,6 +44,18 @@ def test_new_pages_are_embedded() -> None:
     assert any(h.source_url == "https://d/a" for h in hits)
 
 
+def test_on_page_fires_once_per_page_with_running_count() -> None:
+    store = memory_store()
+    result = make_result(
+        new=["https://d/a", "https://d/b"],
+        pages={"https://d/a": "# A\n\nAlpha.", "https://d/b": "# B\n\nBeta."},
+    )
+    calls: list[tuple[int, int]] = []
+    embed_changes(result, FakeEmbedder(), store, on_page=lambda d, t, _u: calls.append((d, t)))
+
+    assert calls == [(1, 2), (2, 2)]  # running done-count out of a fixed total
+
+
 def test_changed_page_replaces_old_chunks() -> None:
     store = memory_store()
     emb = FakeEmbedder()

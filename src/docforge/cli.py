@@ -27,6 +27,7 @@ from docforge.diff import deletions_to_apply
 from docforge.discovery import derive_kb_name, discover_urls
 from docforge.embedder import DEFAULT_DEVICE, DEFAULT_MODEL, Embedder
 from docforge.manifest import Manifest
+from docforge.progress import ProgressBar, format_duration
 from docforge.rag import embed_changes
 from docforge.vectorstore import VectorStore
 
@@ -126,6 +127,7 @@ def run_sync(
     discover=discover_urls,
     crawl: Crawler = crawl_urls,
     conditional=_UNSET,
+    embed=embed_changes,
     embedder: Embedder | None = None,
     store: VectorStore | None = None,
     out=print,
@@ -197,7 +199,7 @@ def run_sync(
         if needs_store:
             to_embed = len(report.new) + len(report.changed)
             out(f"Embedding {to_embed} changed page(s) into the vector store ...")
-            if not _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out):
+            if not _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out, embed):
                 return 1
 
         apply_changes(manifest, result, name=kb_name)
@@ -234,10 +236,10 @@ def _prepare_store(
     return embedder, store
 
 
-def _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out) -> bool:
+def _embed_into_store(result, embedder, store, qdrant_url, qdrant_path, out, embed=embed_changes) -> bool:
     """Embed changes into the (already-prepared) vector store; False + message on error."""
     try:
-        embed_changes(result, embedder, store)
+        embed(result, embedder, store)
     except Exception as exc:  # noqa: BLE001 -- surface any store failure as a clean message
         out(f"Vector store error: {exc}")
         out(_store_error_hint(qdrant_url, qdrant_path))
@@ -441,13 +443,25 @@ def _make_progress_crawl(
     base_delay: tuple[float, float] = DEFAULT_BASE_DELAY,
     rate_limit: bool = True,
 ) -> Crawler:
-    """Build a real crawler (concurrency + rate-limit settings) with a live progress line."""
+    """Build a real crawler (concurrency + rate-limit settings) with a live progress bar.
+
+    Prints a rough upfront estimate for a rate-limited crawl -- on a single docs domain the
+    rate limiter serializes to ~one page per delay, so ``pages * avg_delay`` is a fair guess --
+    then a live, self-correcting ETA that refines it as pages complete.
+    """
 
     def _crawl(urls: Sequence[str]) -> list[CrawledPage]:
         total = len(urls)
+        if total and rate_limit:
+            estimate = total * (base_delay[0] + base_delay[1]) / 2
+            print(
+                f"Estimated crawl time: ~{format_duration(estimate)} for {total} page(s) "
+                "(refined live below)."
+            )
+        bar = ProgressBar(total, "Crawling")
 
         def on_page(done: int, _total: int, _url: str) -> None:
-            print(f"\rCrawling {done}/{total} ...", end="", flush=True)
+            bar.update(done)
 
         pages = crawl_urls(
             urls,
@@ -457,10 +471,29 @@ def _make_progress_crawl(
             on_page=on_page,
         )
         if total:
-            print()  # end the progress line with a newline
+            bar.finish()
         return pages
 
     return _crawl
+
+
+def _make_progress_embed():
+    """Wrap :func:`embed_changes` with a live progress bar (created once the total is known)."""
+
+    def _embed(result, embedder: Embedder, store: VectorStore) -> None:
+        bar: ProgressBar | None = None
+
+        def on_page(done: int, total: int, _url: str) -> None:
+            nonlocal bar
+            if bar is None:
+                bar = ProgressBar(total, "Embedding")
+            bar.update(done)
+
+        embed_changes(result, embedder, store, on_page=on_page)
+        if bar is not None:
+            bar.finish()
+
+    return _embed
 
 
 _SYNC_EXAMPLES = """\
@@ -711,6 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             conditional_mode=args.conditional,
             force=args.force,
             crawl=crawl,
+            embed=_make_progress_embed(),
         )
     if args.command == "diff":
         return run_diff(

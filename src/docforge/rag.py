@@ -13,22 +13,31 @@ chunks are ever held in memory during embedding, and every chunk keeps its ``sou
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from docforge.chunking import chunk_markdown
 from docforge.detector import ChangeDetectionResult
 from docforge.diff import deletions_to_apply
 from docforge.embedder import Embedder
 from docforge.vectorstore import VectorStore
 
+# Called after each page is embedded, as on_page(done, total, source_url) -> lets the CLI
+# drive a live progress bar. Injected so this module stays UI-agnostic (mirrors the crawler).
+ProgressCallback = Callable[[int, int, str], None]
+
 
 def embed_changes(
     result: ChangeDetectionResult,
     embedder: Embedder,
     store: VectorStore,
+    *,
+    on_page: ProgressCallback | None = None,
 ) -> None:
     """Apply a detection result to the vector store: delete stale chunks, embed new ones.
 
     Deletions respect the crawl-success guard (Decision 5.5): a partial crawl never deletes
-    a page's chunks just because it looked missing.
+    a page's chunks just because it looked missing. ``on_page(done, total, source_url)`` fires
+    after each page (whether or not it produced chunks) for live progress.
     """
     store.ensure_collection(embedder.dimension)
 
@@ -40,9 +49,12 @@ def embed_changes(
         store.delete_by_source_url(source_url)
 
     # Embed and upsert new content for new/changed pages, one page at a time.
-    for source_url in report.new | report.changed:
+    to_embed = report.new | report.changed
+    total = len(to_embed)
+    for done, source_url in enumerate(to_embed, start=1):
         chunks = chunk_markdown(result.pages[source_url], source_url=source_url)
-        if not chunks:
-            continue
-        vectors = embedder.embed([chunk.text for chunk in chunks])
-        store.upsert_chunks(chunks, vectors)
+        if chunks:
+            vectors = embedder.embed([chunk.text for chunk in chunks])
+            store.upsert_chunks(chunks, vectors)
+        if on_page is not None:
+            on_page(done, total, source_url)

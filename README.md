@@ -17,6 +17,9 @@ DocForge takes the other path: on every run it **detects exactly which pages cha
 deleting stale chunks and re-embedding just the new content. A re-sync of an unchanged site
 does nothing at all.
 
+📚 **Full documentation:** [`Docs/`](Docs/) (architecture, complete CLI/MCP reference,
+configuration, roadmap) · [`GUID.md`](GUID.md) (the design decision log — the *why*).
+
 ---
 
 ## Contents
@@ -32,6 +35,7 @@ does nothing at all.
 - [Development](#development)
 - [Project status](#project-status)
 - [License](#license)
+- [Full documentation (`Docs/`)](Docs/)
 
 ## Why it exists
 
@@ -85,6 +89,8 @@ Two front doors onto that same core, adding no logic of their own:
                       │  (MCP tools)│
                       └─────────────┘
 ```
+
+Full module-by-module breakdown: [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md).
 
 ## Install
 
@@ -150,8 +156,8 @@ docforge sync <url> --qdrant-path ./vectors         # embedded Qdrant, no Docker
 docforge sync <url> --qdrant-url <cluster-url>      # remote/Qdrant Cloud
 ```
 
-Run `docforge --help` or `docforge <command> --help` for the full, grouped flag reference —
-every subcommand documents its own flags in detail.
+Run `docforge --help` or `docforge <command> --help` for the full, grouped flag reference, or
+see [`Docs/CLI.md`](Docs/CLI.md) for every command and flag in one page.
 
 ### Multiple docs sites
 
@@ -195,7 +201,9 @@ Paste the URL + `Authorization` header into your client's MCP config. For a toke
 stable across restarts instead of regenerating each time, set `DOCFORGE_MCP_TOKEN` in `.env`.
 
 Run `docforge-mcp --help` for every flag (`--transport stdio|http|both`, `--host`, `--port`,
-`--token`, `--no-auth`).
+`--token`, `--no-auth`), or see [`Docs/MCP_SERVER.md`](Docs/MCP_SERVER.md) for the full guide —
+client config examples (Claude Code, a generic `mcp.json`), `both`-transport setup, and
+troubleshooting.
 
 ## Configuration
 
@@ -212,6 +220,8 @@ every setting: **CLI flag > `.env`/environment variable > built-in default.**
 | `DOCFORGE_MCP_TRANSPORT` | `docforge-mcp` default transport | `stdio` |
 | `DOCFORGE_MCP_TOKEN` | stable HTTP auth token (else one is generated per run) | unset |
 
+Full reference, including the three vector-store connection modes: [`Docs/CONFIGURATION.md`](Docs/CONFIGURATION.md).
+
 ## Development
 
 ```bash
@@ -226,9 +236,10 @@ Contributions are welcome — open an issue to discuss a change before sending a
 
 ## Project status
 
-Change detection, RAG sync, the CLI, and the MCP server are all built and tested (see
-[`GUID.md`](GUID.md) for the full design history and reasoning behind each decision). Packaging
-the whole tool as a Docker image is next.
+Change detection, RAG sync, the CLI, and the MCP server are all built and tested — see
+[`Docs/ROADMAP.md`](Docs/ROADMAP.md) for what shipped in each milestone, and
+[`GUID.md`](GUID.md) for the design reasoning behind each decision. Packaging the whole tool as
+a Docker image is next.
 
 ## License
 

@@ -1,18 +1,22 @@
 # DocForge — Project Guide
 
-> **Living document.** This is the project's memory. It records not just _what_ we are
-> building, but _why_ each decision was made. Read it before writing code; update it when
-> a decision changes. If you ever forget why something is the way it is, the answer belongs here.
+> **Living document.** This is the project's memory. It records not just _what_ we built, but
+> _why_ each decision was made. Read it before making an architectural change; update it when a
+> decision changes or a milestone completes. If you ever forget why something is the way it is,
+> the answer belongs here.
+>
+> For **what's implemented today** — commands, flags, configuration — see [`README.md`](README.md)
+> and the [`Docs/`](Docs/) folder. This file is the *decision log*, not the user manual.
 
 ---
 
 ## 0. How to read this document
 
-This guide is written to serve two audiences at once:
+This guide serves two audiences at once:
 
-1. **You**, working in VS Code, needing a single source of truth for the project.
-2. **A local LLM assistant**, which can load this file as context to help you build DocForge
-   without re-explaining the whole project every time.
+1. **A contributor**, needing the reasoning behind the architecture before changing it.
+2. **A local LLM assistant**, which can load this file as context to work on DocForge without
+   re-explaining the whole project every time.
 
 Each major decision is written as **Decision → Reasoning → Trade-off**, because the reasoning
 is the transferable skill. Tools change; judgment does not.
@@ -40,7 +44,8 @@ outdated or wrong APIs. So the local model needs a **local, always-fresh knowled
 built from documentation.
 
 **That knowledge base is what DocForge builds and maintains.** DocForge is the fuel line for
-Legendary Dev Tool — it is not a side quest, it is what keeps the whole engine accurate.
+Legendary Dev Tool — it is not a side quest, it is what keeps the whole engine accurate. It is
+also fully usable standalone, independent of Legendary Dev Tool.
 
 > **Scope discipline:** This guide covers **DocForge only.** Legendary Dev Tool is the context,
 > not the current work.
@@ -73,7 +78,7 @@ cost every time.
 ## 3. Prior art — what exists and why it isn't enough
 
 | Existing tool                                  | What it solves                                                                                     | Why it's not enough                                                                                                         |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | **Crawl4AI**                                   | Crawls sites, converts HTML → clean, LLM-ready Markdown.                                           | No hash-diffing or cross-run update logic.                                                                                  |
 | **LlamaIndex `IngestionPipeline`**             | Hash-based dedup + `UPSERTS_AND_DELETE` strategy: updates only changed docs, removes deleted ones. | No web crawler. Expects ready-made `Document` objects. Update logic runs _within_ a run, not _across_ crawl runs over time. |
 | **Commercial actors (Apify, Firecrawl, etc.)** | Some track a per-page content hash across runs.                                                    | Leave scheduling + diff logic to the user; paid/closed products.                                                            |
@@ -100,24 +105,33 @@ commercial products.
 ## 4. The solution architecture
 
 DocForge is a lightweight open-source bridge connecting Crawl4AI's crawling to an update-aware
-RAG pipeline, built specifically for documentation sites. It splits cleanly into two halves.
+RAG pipeline, built specifically for documentation sites. It splits cleanly into two halves,
+plus two thin front doors onto that same core.
 
-### v1 — Change detection
+### Change detection (M1)
 
 ```
-crawl (Crawl4AI) → clean markdown → hash per page → compare to last run
-    → { changed, new, deleted } list
+crawl (Crawl4AI) → clean markdown → normalize → hash per page → compare to last run
+    → { new, changed, deleted, unchanged }
 ```
 
-### v2 — RAG sync
+### RAG sync (M2)
 
 ```
 diff report → delete stale chunks for changed/deleted pages
     → chunk + embed new content → upsert to vector store → update stored hash
 ```
 
+### Front doors (M3, M4) — thin, no logic of their own
+
+```
+docforge (CLI)        → a human, a terminal    → sync/diff/status/search/remove
+docforge-mcp (server) → an LLM, a chat client   → list_docs/search_docs as MCP tools
+```
+
 **End result:** run `docforge sync <docs-site>` once to build the knowledge base. Run it again
-months later, and only the pages that actually changed get re-processed.
+months later, and only the pages that actually changed get re-processed — an unchanged site
+re-syncs to a no-op.
 
 ---
 
@@ -146,12 +160,12 @@ The pipeline splits into two halves. Ask "commodity or differentiator?" for each
   but it is a heavy dependency with a large transitive tree — which fights our design goal of a
   _lightweight, local, dockerized_ tool. So: use thin, well-scoped libraries for the commodity
   parts (a local embedding model, a vector DB with good native `delete-by-metadata` and `upsert`),
-  and write the ~50 lines of orchestration ourselves.
+  and write the orchestration ourselves.
 
 - **Trade-off:** Slightly more code than importing LlamaIndex wholesale — but we understand every
   line (critical, since this feeds Legendary Dev Tool), and the project stays light. We design the
-  embedder and vector store as **pluggable interfaces** so someone can swap in LlamaIndex later if
-  they want.
+  embedder and vector store as **pluggable interfaces** (realized in M2 as Python `Protocol`
+  classes — see Decision 5.8) so someone can swap in a different implementation later.
 
 ### Decision 5.3 — The page/chunk metadata scheme is make-or-break
 
@@ -160,8 +174,7 @@ The pipeline splits into two halves. Ask "commodity or differentiator?" for each
 - **The solution:** every chunk must carry stable metadata pointing back to its page — a
   `source_url`. Then "delete stale chunks for page X" is simply: delete where `source_url == X`.
 - **Reasoning:** Get this right up front and sync is easy. Get it wrong and you get orphaned and
-  duplicated chunks forever. This is exactly where newbies get burned and seniors think _before_
-  coding.
+  duplicated chunks forever. This is exactly where it pays to think before coding.
 
 ### Decision 5.4 — Hash the normalized markdown, not raw HTML
 
@@ -176,21 +189,139 @@ The pipeline splits into two halves. Ask "commodity or differentiator?" for each
 
 - **The danger:** we detect a deleted page by comparing this crawl's URL set against last run's.
   But if a crawl _fails halfway_, good pages look "missing" and we would wrongly delete their chunks.
-- **The rule:** **Never apply deletions unless the crawl completed successfully.** Guard it explicitly.
+- **The rule:** **Never apply deletions unless the crawl completed successfully.** Guard it
+  explicitly (`deletions_to_apply`), and apply the same guard everywhere a deletion could
+  happen — the manifest *and* the vector store both have to agree on it independently.
 
 ### Decision 5.6 — Idempotency from day one
 
 - **Rule:** Running `docforge sync` twice in a row with no doc changes must do _nothing_ the second
-  time — no re-embedding, no errors.
+  time — no re-embedding, no errors, no writes.
 - **Reasoning:** Designing for idempotency from the start makes the whole architecture cleaner and
-  is the mark of a robust tool.
+  is the mark of a robust tool. It's also what makes a 300-page unchanged re-sync fast: the
+  expensive work (crawl, embed) is skipped, not just the write.
 
 ### Decision 5.7 — SQLite as the state/manifest store
 
-- **What state we need:** a manifest remembering `url → content_hash → chunk_ids → last_seen`.
+- **What state we need:** a manifest remembering `(knowledge_base, url) → content_hash →
+  last_seen`, plus HTTP validators for the conditional-request pre-check (Decision 5.13).
 - **Reasoning:** SQLite is a single-file, zero-config, transactional store — a perfect fit for a
   local tool. It becomes the "memory" of DocForge.
-- **Trade-off:** Not a networked/multi-writer DB, but we don't need one for a local single-process tool.
+- **Trade-off:** Not a networked/multi-writer DB, but we don't need one for a local single-process
+  tool.
+
+### Decision 5.8 — Pluggable interfaces via Python `Protocol`, not base classes
+
+- **Reasoning:** The embedder and vector store are both defined as `Protocol` classes
+  (`Embedder`: `.dimension`, `.embed(texts)`; `VectorStore`: `ensure_collection`,
+  `upsert_chunks`, `delete_by_source_url`, `search`, ...) rather than abstract base classes. Any
+  object with the right method shapes satisfies the interface automatically — no inheritance
+  required. The rest of the codebase depends on these shapes, never on the concrete
+  implementation (fastembed, Qdrant) directly.
+- **Trade-off:** Slightly less IDE "jump to implementation" convenience than a concrete base
+  class; in exchange, tests inject tiny fakes with zero real dependencies, and swapping either
+  implementation later touches exactly one file.
+
+### Decision 5.9 — Qdrant as the vector store; three connection modes
+
+- **Reasoning:** Qdrant has first-class `delete-by-filter` (the exact primitive
+  `delete_by_source_url` needs) and a genuinely local, no-server embedded mode — important for a
+  tool whose whole premise is "local-first, zero required infrastructure." It supports three
+  connection shapes from the same client library: a Docker container (`docker-compose.yml`,
+  persisted to a named volume), embedded on-disk (`--qdrant-path`, in-process, no server at
+  all — like SQLite), or a remote/managed cluster (`--qdrant-url` + `--qdrant-api-key`, e.g.
+  Qdrant Cloud). One collection per knowledge base, so KBs are cleanly isolated from each other.
+- **Trade-off:** A real dependency (vs. hand-rolling a flat-file vector index), justified by how
+  much correct, fast filtered-delete behavior it buys for free.
+
+### Decision 5.10 — fastembed for local embeddings; GPU is the real performance lever
+
+- **Reasoning:** fastembed runs ONNX models locally with no PyTorch dependency — lightweight,
+  fits the local-first goal. Default model is `BAAI/bge-small-en-v1.5` (384-dim, small, fast,
+  good quality for English documentation). Measurement during development showed embedding is
+  the dominant cost of a sync (~99.8% of processing time once crawling is parallelized) — so
+  `--device auto|cpu|cuda` (GPU auto-detected, with an automatic, warned fallback to CPU if GPU
+  setup fails) is the lever that actually matters for large syncs, not micro-optimizing batch
+  sizes.
+- **Trade-off:** A GPU-accelerated embedder never crashes for lack of a GPU (graceful
+  degradation to CPU), at the cost of a slightly more complex constructor than "always CPU."
+
+### Decision 5.11 — Chunking: paragraph-packing with overlap, character-based
+
+- **Reasoning:** Split on paragraph (blank-line) boundaries, greedily pack paragraphs up to a
+  character budget (default 1200 chars), hard-split any single paragraph that alone exceeds the
+  budget, and carry a small overlap (default 150 chars) from each chunk into the next so a
+  thought spanning a chunk boundary isn't lost entirely on either side.
+- **Trade-off:** Character-based sizing is a proxy for the embedding model's actual token count,
+  not exact — simple and effective in practice, with token-aware sizing left as a future
+  refinement if it ever proves necessary.
+
+### Decision 5.12 — Multiple named knowledge bases
+
+- **Reasoning:** One user syncing several docs sites (Docker, nginx, Kubernetes...) needs them
+  isolated and independently searchable, not mixed into one undifferentiated pile. Realized as:
+  one SQLite manifest file with a `(name, url)` composite primary key (so many sites share one
+  small file, scoped by `name`), and **one Qdrant collection per knowledge base** (a different
+  isolation mechanism for a different storage engine — each the natural fit for that engine, not
+  forced to match). The default name is derived from the URL's host
+  (`docs.docker.com` → `docs_docker_com`), overridable with `--name`.
+- **Trade-off:** A composite key is marginally more complex than a single-column primary key;
+  in exchange, `docforge search` can merge results across every knowledge base by default with
+  no extra bookkeeping, and removing one KB never touches another's data.
+
+### Decision 5.13 — HTTP conditional requests as a *guarded* pre-check, not a blanket one
+
+- **Reasoning:** A page's own HTTP server can answer "did this change?" cheaply via
+  `ETag`/`If-Modified-Since`, avoiding a full headless-browser render for pages that are
+  unchanged. But conditional-checking *every* URL before every crawl — including on a first-ever
+  sync, where nothing is stored yet — means thousands of pointless requests that can only ever
+  come back 200, turning into a multi-minute stall before the real crawl even starts. The fix:
+  only issue a conditional request for a URL that has **both** been seen before **and** has a
+  stored validator to send (`_preselect` in `detector.py`); every other URL skips straight to a
+  real crawl, which captures fresh validators for next time.
+- **Trade-off:** A site that never sends validators gets no benefit from this — the pre-check
+  degrades to "no-op," never to "silently miss a real change." Reported explicitly to the user
+  (`--conditional auto|on|off`) rather than failing silently.
+
+### Decision 5.14 — Parallel, rate-limited crawling
+
+- **Reasoning:** Sequential crawling doesn't scale to sites with hundreds or thousands of pages.
+  Crawling runs concurrently (Crawl4AI's `arun_many` + a memory-aware dispatcher, capping
+  concurrent browser sessions by available RAM) with a per-*domain* rate limiter (a polite random
+  delay between requests to the same site, with backoff on 429/503) — since on a single big docs
+  site, that per-domain delay is the real throughput ceiling, not raw concurrency.
+  `--concurrency`/`--crawl-delay`/`--no-rate-limit` expose the actual knobs that matter.
+- **Trade-off:** Faster crawling is also less polite; defaults are deliberately modest (5
+  concurrent, 0.5–1.5s delay), with the aggressive settings opt-in for sites the user controls
+  or trusts.
+
+### Decision 5.15 — Dependency injection over a framework, for both front doors
+
+- **Reasoning:** Both `cli.py` and `mcp_server.py` follow the same shape: a plain, injectable
+  function holds the real logic (`run_sync`, `search_docs_text`, ...) with real production
+  defaults for anything that touches the network/a model/a store; a thin wiring layer
+  (`main()`/`build_server()`) supplies the real implementations. No web framework, no CLI
+  framework beyond the stdlib's `argparse` — just functions and Protocol-typed parameters. This
+  is what makes the test suite run in seconds with no Docker, no browser, and (mostly) no model
+  download, and what let the MCP server be built as a *second* thin front door onto the exact
+  same core with no logic duplicated.
+- **Trade-off:** More explicit wiring code than a framework would generate, in exchange for the
+  whole system being traceable by reading it, not by knowing a framework's conventions.
+
+### Decision 5.16 — MCP server: retrieval-only scope, secure by default
+
+- **Reasoning:** M4 exposes DocForge's existing search as MCP tools (`list_docs`, `search_docs`)
+  for any MCP-capable LLM client — Claude Code, Claude Desktop, LM Studio, a custom local-LLM
+  agent. Deliberately **out of scope**: an ingestion/crawl tool. Crawling a large site takes
+  minutes, which is the wrong shape for a synchronous tool call inside a chat turn; ingestion
+  stays a CLI-only operation run on the user's own schedule. Two transports: `stdio` (the client
+  spawns the process itself — no network boundary, no auth needed) and `http` (a real network
+  boundary — secured **by default** with a randomly generated bearer token, printed once per run
+  and never persisted, the same pattern Jupyter Notebook uses for its own local server; an
+  explicit `--no-auth` opts out, and `DOCFORGE_MCP_TOKEN` gives a stable token across restarts).
+- **Trade-off:** No "ask the assistant to go index a new site" convenience from inside a chat —
+  a deliberate line, revisitable if a real recurring need for it shows up (it would need to be a
+  background job with a status-poll tool, not a blocking call, to do properly).
 
 ---
 
@@ -202,10 +333,9 @@ The pipeline splits into two halves. Ask "commodity or differentiator?" for each
 
 1. **Am I allowed to, given my dependencies?** Dependency licenses constrain yours. The danger is
    _copyleft_ (GPL/AGPL), which can force your whole project to adopt the same terms. We checked
-   every core dependency — none are copyleft:
-   - **Crawl4AI → Apache-2.0** (permissive; commercial use OK). It _requests_ attribution (a badge
-     or a text line). Honor it — one line in the README.
-   - **LlamaIndex → MIT** (the most permissive common license).
+   every core dependency — none are copyleft: **Crawl4AI** (Apache-2.0, permissive, commercial
+   use OK — it requests attribution, honored in the README), **Qdrant** and **fastembed**
+   (Apache-2.0), the **MCP Python SDK** (MIT).
 2. **Is the code legally mine to give away?** Yes — we write the orchestration ourselves, no
    copy-pasted source. (Real-world checklist item: if code were written on an employer's time/
    equipment, an IP clause could claim it. This project is independent, so we're clear.)
@@ -213,8 +343,9 @@ The pipeline splits into two halves. Ask "commodity or differentiator?" for each
 
 ### Decision: license DocForge under **Apache-2.0**
 
-- **Reasoning:** Pairs cleanly with Crawl4AI (same license, zero friction), includes an explicit
-  patent grant that protects users, and reads as a deliberate, serious project.
+- **Reasoning:** Pairs cleanly with Crawl4AI/Qdrant/fastembed (same license, zero friction),
+  includes an explicit patent grant that protects users, and reads as a deliberate, serious
+  project.
 - **Alternative:** MIT — shorter and even more permissive; a fine choice if brevity is valued.
 - **Disclaimer:** This is engineering judgment, not legal advice. For a hobby/portfolio OSS tool
   this is fine; if it ever goes commercial, get real legal review.
@@ -227,162 +358,47 @@ We build in **vertical slices**: each milestone is _working software_, shipped f
 next begins. We do **not** build all layers at once — that is the classic failure mode (five
 projects in one trench coat, none finished).
 
-| Milestone | Deliverable                                                                                                                                                   | Status          |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| **M0**    | Scaffolding: repo, venv, `LICENSE`, `README`, tests + CI, linting. Open-source standard from commit one.                                                      | **In progress** |
-| **M1**    | Change detection only: crawl → normalize → hash → SQLite manifest → diff report (new/changed/deleted). No RAG yet. Independently testable and already useful. | Next            |
-| **M2**    | RAG sync: chunk → embed (local model) → upsert to vector DB → delete stale, wired to M1's diff. Pluggable embedder + store.                                   | Later           |
-| **M3**    | One-command CLI + config: `docforge sync <url>`, idempotent and resumable.                                                                                    | Later           |
-| **M4**    | MCP server — expose DocForge as MCP tools so any MCP-capable LLM (local, Claude, etc.) can use it.                                                            | Later           |
-| **M5**    | Docker + run-as-service for a clean, no-manual-setup user experience.                                                                                         | Later           |
+| Milestone | Deliverable | Status |
+| --------- | ----------- | ------ |
+| **M0** | Scaffolding: repo, venv/uv, `LICENSE`, `README`, tests + CI, linting. Open-source standard from commit one. | **Done** |
+| **M1** | Change detection: crawl → normalize → hash → SQLite manifest → diff report (new/changed/deleted). No RAG yet, independently testable and already useful. | **Done** |
+| **M2** | RAG sync: chunk → embed (local model) → upsert to vector DB → delete stale, wired to M1's diff. Pluggable embedder + store. | **Done** |
+| **M3** | One-command CLI: `docforge sync/diff/status/search/remove`, idempotent, `.env` config, live progress. | **Done** |
+| **M4** | MCP server — expose DocForge as MCP tools (`list_docs`, `search_docs`) so any MCP-capable LLM client can use it; stdio + HTTP transports, secure-by-default auth. | **Done** |
+| **M5** | Docker + run-as-service for a clean, no-manual-setup user experience. | **Next** |
+
+Full detail on what shipped in each milestone: [`Docs/ROADMAP.md`](Docs/ROADMAP.md). Command
+reference: [`Docs/CLI.md`](Docs/CLI.md). MCP server reference: [`Docs/MCP_SERVER.md`](Docs/MCP_SERVER.md).
 
 ---
 
-## 8. M0 — scaffolding details (current work)
+## 8. M0 in retrospect
 
-Assumes **Python 3.11+** (Crawl4AI needs 3.10+; use a modern version).
+M0 established the project skeleton: a `src/` layout (forces installing the package to import
+it, so tests run against exactly what a user would experience — catching packaging bugs early),
+Apache-2.0 from commit one, and CI (lint + test) running on every push so the project stays
+provably green, not just "green on my machine."
 
-### Step 1 — Virtual environment
-
-```bash
-mkdir docforge && cd docforge
-python3.11 -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-python -m pip install --upgrade pip
-```
-
-_Why:_ a venv is an isolated Python sandbox per project. Without it, conflicting dependency versions
-across projects cause "dependency hell." One isolated environment per project, always. Installing
-globally is the newbie tell.
-
-### Step 2 — Git + `.gitignore` (before the first commit)
-
-```bash
-git init
-```
-
-`.gitignore`:
-
-```
-.venv/
-__pycache__/
-*.pyc
-.env
-*.db
-*.sqlite3
-dist/
-build/
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-```
-
-_Why:_ commit the _recipe_, not the installed environment (`.venv/`). Never commit secrets (`.env`)
-— committing secrets to a public repo is the most common catastrophic OSS mistake. `*.db` keeps the
-local SQLite manifest out of the repo.
-
-### Step 3 — Project layout (`src/` layout)
-
-```
-docforge/
-├── src/
-│   └── docforge/
-│       ├── __init__.py
-│       ├── crawler.py       # (M1) wraps Crawl4AI
-│       ├── hashing.py       # (M1) normalize + hash
-│       ├── manifest.py      # (M1) SQLite state
-│       └── diff.py          # (M1) new/changed/deleted
-├── tests/
-│   └── test_hashing.py
-├── pyproject.toml
-├── README.md
-├── LICENSE
-├── .gitignore
-└── .github/
-    └── workflows/
-        └── ci.yml
-```
-
-_Why `src/`:_ it forces you to install your own package to import it, so tests run against the
-_installed_ package exactly as a user would experience it — catching packaging bugs early.
-
-### Step 4 — `pyproject.toml`
-
-Modern single source of truth for build config, dependencies, and tooling (replaces `setup.py` +
-`requirements.txt`):
-
-```toml
-[project]
-name = "docforge"
-version = "0.1.0"
-description = "Keeps a documentation RAG in sync by detecting and updating only what changed."
-readme = "README.md"
-requires-python = ">=3.11"
-license = "Apache-2.0"
-dependencies = []   # added deliberately, per milestone
-
-[project.optional-dependencies]
-dev = ["pytest", "ruff"]
-
-[project.scripts]
-docforge = "docforge.cli:main"   # wires the `docforge` command (M3)
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.ruff]
-line-length = 100
-```
-
-Install in editable mode:
-
-```bash
-pip install -e ".[dev]"
-```
-
-_Why `dependencies = []`:_ we add each library _when its milestone needs it and we understand why_,
-never a giant speculative list. _Why `-e`:_ code changes take effect instantly without reinstalling.
-
-### Step 5 — Open-source-standard files
-
-- **`LICENSE`** — full Apache-2.0 text (use GitHub's "Add file → LICENSE" picker for the canonical copy).
-- **`README.md`** — the front door: what DocForge does, the problem, install steps, a usage example,
-  and the Crawl4AI attribution line. A good README is a real differentiator.
-- **`.github/workflows/ci.yml`** — runs linter + tests on every push (proves the project stays green
-  automatically, not just "on my machine"):
-
-```yaml
-name: CI
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest
-```
-
-### Finish M0
-
-```bash
-git add .
-git commit -m "chore: project scaffolding"
-```
+**Tooling note:** M0 was originally built with a raw `venv` + `pip install -e`. The project has
+since moved to [**uv**](https://docs.astral.sh/uv/) for environment and dependency management
+(`uv sync`, `uv run ...`, `uv.lock` committed) — faster, and it unifies "create the venv" and
+"install locked dependencies" into one command. See `README.md` for the current install steps;
+this section is kept only as a historical record of the reasoning, not as a setup guide.
 
 ---
 
-## 9. Open decisions (to settle before M1/M2)
+## 9. Decisions settled since M0
 
-- **[ ] Vector database choice** (needed before M2, shapes M1's manifest + chunk-metadata design):
-  Chroma, Qdrant, or LanceDB? Must have good native `upsert` and `delete-by-metadata`. Decide based
-  on what Legendary Dev Tool will use locally.
-- **[ ] Local embedding model** (M2): which model runs locally for embeddings.
-- **[ ] Chunking strategy** (M2): how documentation markdown is split into chunks.
+At the end of M0, three questions were still open. All three are resolved and documented as
+full Decision entries above — recorded here as a single pointer so the history isn't lost:
+
+- **Vector database** → **Qdrant** (Decision 5.9).
+- **Local embedding model** → **fastembed**, default `BAAI/bge-small-en-v1.5` (Decision 5.10).
+- **Chunking strategy** → **paragraph-packing with overlap** (Decision 5.11).
+
+No open decisions remain blocking current work. The next real decision point is M5 (Docker
+packaging) — how the whole tool (DocForge + a bundled Qdrant) ships as a single, no-setup
+container.
 
 ---
 
@@ -395,13 +411,23 @@ These are the habits that separate an experienced SDE from a newbie. They apply 
 3. **Scope discipline / vertical slices.** Ship one working slice fully before starting the next.
    Most projects die from building all layers at once and finishing none.
 4. **Design the hard invariant first** (here: the page→chunk metadata scheme). Think before coding
-   at exactly the point where newbies get burned.
-5. **Guard the dangerous operations** (deletion only on successful crawl).
+   at exactly the point where it's easy to get burned.
+5. **Guard the dangerous operations** (deletion only on successful crawl) — and apply the guard
+   independently everywhere it matters, so it can't drift out of sync between subsystems.
 6. **Idempotency and clean state** from day one.
 7. **Honest positioning.** Don't overclaim novelty; state your real, defensible differentiator.
 8. **Ask "who owns this code?" and "what license constrains me?"** reflexively.
 9. **Document decisions and their reasoning** (this file) so the _why_ survives.
+10. **Verify claims about runtime behavior live, not just via unit tests.** A real end-to-end
+    smoke test (a real crawl, a real embedded vector store, a real second knowledge base) caught
+    a genuine bug — embedded-mode Qdrant crashing on a second collection because a client was
+    never closed — that an all-fakes unit test suite had no way to see, because the fake never
+    modeled the resource in question.
+11. **Security defaults should be secure without effort.** The MCP server's HTTP auth defaults to
+    *on* (an auto-generated token, printed for the user) rather than requiring someone to
+    remember a flag — the safe path and the path of least resistance should be the same path.
 
 ---
 
-_Last updated: during M0. Update this file whenever a decision changes or a milestone completes._
+_Last updated: after M4 (MCP server) — see §7 for full milestone status. Update this file
+whenever a decision changes or a milestone completes._

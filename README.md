@@ -1,102 +1,239 @@
 # DocForge
 
-**Keeps a documentation RAG in sync by detecting and updating only what changed — instead of rebuilding everything.**
+[![CI](https://github.com/PRABAKARAN32/docforge/actions/workflows/ci.yml/badge.svg)](https://github.com/PRABAKARAN32/docforge/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-Documentation sites change constantly. Most RAG pipelines handle updates the wasteful way: re-crawl the whole site and re-embed every page, even when only a handful changed. For a large docs site (1,000–10,000+ pages) that means long refresh windows, wasted embedding cost, and stale answers in between.
+**Keeps a documentation RAG knowledge base fresh by detecting exactly which pages changed —
+instead of rebuilding everything.**
 
-DocForge takes the other path: on each run it **detects exactly which pages changed** (hashing normalized markdown) and **touches only those** — deleting stale chunks and re-embedding just the new content.
+Documentation sites change constantly. Most RAG pipelines handle updates the wasteful way:
+re-crawl the whole site and re-embed every page, even when only a handful changed. For a large
+docs site (1,000–10,000+ pages) that means long refresh windows, wasted embedding cost, and
+stale answers in between.
 
-> **Status:** Early development — **M0 (scaffolding)**. Change detection (M1) and RAG sync (M2) are next. See [`GUID.md`](GUID.md) for the full design and reasoning.
+DocForge takes the other path: on every run it **detects exactly which pages changed**
+(hashing normalized markdown, comparing against the last run) and **touches only those** —
+deleting stale chunks and re-embedding just the new content. A re-sync of an unchanged site
+does nothing at all.
+
+---
+
+## Contents
+
+- [Why it exists](#why-it-exists)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [CLI usage](#cli-usage)
+- [MCP server: connect an LLM to your docs](#mcp-server-connect-an-llm-to-your-docs)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Project status](#project-status)
+- [License](#license)
 
 ## Why it exists
 
-DocForge is the local, always-fresh knowledge base behind **Legendary Dev Tool**, a local-first AI coding assistant. A local LLM is only as good as the context it has; DocForge keeps that context current without sending code to third parties or paying per-request.
+DocForge is the local, always-fresh knowledge base behind **Legendary Dev Tool**, a local-first
+AI coding assistant. A local LLM is only as good as the context it has — if it doesn't know the
+*current* documentation for the libraries you're using, it hallucinates outdated or wrong APIs.
+DocForge keeps that context current, entirely on your own machine: no code or docs sent to a
+third party, no per-request cost.
+
+It's equally usable standalone: point it at any documentation site and get a searchable,
+always-current knowledge base — from the terminal, or as MCP tools an LLM client calls directly.
+
+## Features
+
+- **Change detection that actually skips work** — normalized-markdown hashing + an HTTP
+  conditional-request (ETag/304) pre-check mean an unchanged page is never re-crawled *or*
+  re-embedded, not just re-embedded.
+- **Multiple named knowledge bases** — sync as many docs sites as you want, each isolated in
+  its own manifest scope and vector-store collection (`--name`, defaults to the site's host).
+- **Local-first, three ways to run the vector store** — Docker container, embedded on-disk
+  (no Docker, no server, like SQLite), or point at a remote/managed Qdrant Cloud cluster.
+- **Local embeddings** — [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch),
+  with automatic GPU use when available (`--device auto|cpu|cuda`).
+- **Parallel, rate-limited crawling** — concurrent with a per-domain politeness delay,
+  configurable or disabled entirely (`--concurrency`, `--crawl-delay`, `--no-rate-limit`).
+- **Live progress with a self-correcting ETA** — no more wondering if a multi-thousand-page
+  sync has hung.
+- **An MCP server** (`docforge-mcp`) — exposes your knowledge bases as tools (`list_docs`,
+  `search_docs`) any MCP-capable LLM client can call: Claude Code, Claude Desktop, LM Studio,
+  or your own agent. stdio and HTTP transports, HTTP secured with an auto-generated bearer
+  token by default.
+- **`.env` configuration** — set your Qdrant/DB/model settings once instead of repeating flags.
 
 ## How it works
 
 ```
-crawl (Crawl4AI) → normalized markdown → hash per page → diff vs. last run
-    → { new, changed, deleted }
-    → delete stale chunks → chunk + embed new content → upsert → update stored hash
+crawl (Crawl4AI) → normalize markdown → hash per page → diff vs. last run
+    → { new, changed, deleted, unchanged }
+    → delete stale chunks → chunk + embed only new/changed content → upsert → update stored hash
 ```
 
-## Install (development)
+Two front doors onto that same core, adding no logic of their own:
+
+```
+                     ┌─────────────┐        ┌──────────────────┐
+  a terminal   ───▶  │  docforge   │  ───▶  │   change          │  ───▶  vector store
+  (a human)          │  (CLI)      │        │   detection +     │        (Qdrant)
+                      └─────────────┘        │   RAG sync core   │
+  an LLM chat  ───▶  ┌─────────────┐  ───▶  │                   │  ───▶  SQLite manifest
+  (MCP client)       │ docforge-mcp│        └──────────────────┘        (page hashes)
+                      │  (MCP tools)│
+                      └─────────────┘
+```
+
+## Install
 
 Requires **Python 3.11+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync                 # creates .venv and installs everything from uv.lock
-uv run crawl4ai-setup   # one-time: installs the headless browser Crawl4AI needs
+git clone https://github.com/PRABAKARAN32/docforge.git
+cd docforge
+uv sync                       # creates .venv, installs everything from uv.lock
+uv run playwright install chromium   # one-time: the headless browser Crawl4AI needs
 ```
 
-Run the checks:
+## Quickstart
+
+**1. Start a vector store** — pick one:
 
 ```bash
-uv run ruff check .
-uv run pytest                               # fast tests only
-DOCFORGE_NETWORK_TESTS=1 uv run pytest      # include live-crawl integration tests
+docker compose up -d                              # A) Qdrant in Docker (persists to a volume)
+# or, no Docker at all:
+docforge sync <url> --qdrant-path ./docforge_vectors   # B) embedded, in-process
 ```
 
-## Usage
-
-**The vector database (Qdrant) can run two ways** — pick one:
+**2. Build a knowledge base:**
 
 ```bash
-# A) Server mode: run Qdrant in Docker (persists to a named volume)
-docker compose up -d
-docforge sync https://docs.example.com/
-
-# B) Embedded mode: no Docker — Qdrant runs in-process, vectors in a local folder
-docforge sync https://docs.example.com/ --qdrant-path ./docforge_vectors
+uv run docforge sync https://docs.python.org/3/
 ```
 
-(You can also point `--qdrant-url` at any Qdrant server you run yourself — native install or
-remote. Embedded mode is simplest for personal use; server mode scales better for very large
-sites.)
-
-More options:
+**3. Search it:**
 
 ```bash
-docforge sync https://nginx.org/en/docs/ --bfs   # no sitemap? crawl page-by-page
+uv run docforge search "how does async work"
+```
+
+**4. Run it again later** — only pages that actually changed get re-crawled and re-embedded:
+
+```bash
+uv run docforge sync https://docs.python.org/3/   # unchanged pages: skipped entirely
+```
+
+## CLI usage
+
+```bash
+docforge sync <url> [options]     # crawl, detect changes, embed into the vector store
+docforge diff <url>               # preview what would change — write nothing
+docforge status                   # list knowledge bases and their page counts
+docforge search "<query>"         # search one KB (--name) or all of them (default)
+docforge remove <name>            # drop a knowledge base (or --all to wipe everything)
+```
+
+Common flags on `sync`/`diff`:
+
+```bash
+docforge sync <url> --name docker                 # explicit knowledge-base name
+docforge sync <url> --bfs                         # no sitemap? crawl page-by-page instead
 docforge sync <url> --dry-run                     # preview changes, write nothing
-docforge sync <url> --max-pages 100               # cap pages processed
-docforge sync <url> --concurrency 10              # crawl 10 pages in parallel (faster)
-docforge sync <url> --embed-model BAAI/bge-base-en-v1.5   # a larger embedding model
-docforge sync <url> --device auto                 # use GPU for embedding if available, else CPU
-docforge sync <url> --force                       # ignore ETag/304, re-crawl every page
+docforge sync <url> --max-pages 100                # cap pages processed
+docforge sync <url> --concurrency 10               # crawl 10 pages in parallel
+docforge sync <url> --crawl-delay 0.2 0.5          # tune the per-domain politeness delay
+docforge sync <url> --device cuda                  # use a GPU for embedding
+docforge sync <url> --force                        # ignore ETag/304, re-crawl every page
+docforge sync <url> --qdrant-path ./vectors         # embedded Qdrant, no Docker
+docforge sync <url> --qdrant-url <cluster-url>      # remote/Qdrant Cloud
 ```
 
-On re-syncs of sites that send `ETag`/`Last-Modified`, DocForge uses HTTP conditional requests to
-**skip re-crawling unchanged pages entirely** (a tiny request instead of a full browser render).
+Run `docforge --help` or `docforge <command> --help` for the full, grouped flag reference —
+every subcommand documents its own flags in detail.
 
-### Multiple docs sites (named knowledge bases)
+### Multiple docs sites
 
-Each site can live in its own **named knowledge base** (a separate Qdrant collection), so
-they're isolated and independently searchable. The name defaults to the host, or set `--name`:
+Each site lives in its own **named knowledge base** — isolated manifest scope and vector-store
+collection, independently searchable:
 
 ```bash
 docforge sync https://docs.docker.com/   --name docker
 docforge sync https://nginx.org/en/docs/ --name nginx --bfs
+
+docforge search "<query>" --name docker    # search just one
+docforge search "<query>"                  # search all of them, merged by relevance
 ```
 
-### Other commands
+## MCP server: connect an LLM to your docs
+
+`docforge-mcp` exposes the knowledge bases you built with `docforge sync` as tools an LLM can
+call mid-conversation — `list_docs()` and `search_docs(query, name=None)`. It adds no new
+retrieval logic; it's a thin front door onto the exact same core the CLI uses.
+
+**For a client that launches the server itself** (Claude Code, Claude Desktop) — stdio, the
+default, no network involved at all:
 
 ```bash
-docforge diff <url>                 # preview what would change (write nothing)
-docforge status                     # list knowledge bases and their page counts
-docforge search "<query>" --name docker   # search one knowledge base
-docforge search "<query>" --all            # search across all of them
-docforge remove docker              # drop a whole knowledge base (manifest + vectors)
+claude mcp add docforge -- uv run --directory /path/to/docforge docforge-mcp
 ```
 
-Run `docforge --help` (or `docforge <command> --help`) for all options.
+**For a client that connects by URL** (LM Studio, a custom agent) — HTTP, secured by default
+with an auto-generated token (fresh every run, printed for you to copy — the same idea as
+Jupyter Notebook's own auto-token):
 
-Run it once to build the knowledge base; run it again later and **only the pages that actually
-changed** get re-crawled-and-re-embedded — unchanged pages are skipped, and a run with no changes
-does nothing. Vectors are stored in Qdrant; page hashes in a local SQLite manifest.
+```bash
+uv run docforge-mcp --transport http --port 8000
+```
+```
+DocForge MCP server (http) listening at http://127.0.0.1:8000/mcp
+Auth token (generated fresh this run): 8c8JWYJyugjd2MaLgSTHOhkU_0B-HOl8B7IoithwNRA
+Authorization header: Bearer 8c8JWYJyugjd2MaLgSTHOhkU_0B-HOl8B7IoithwNRA
+```
+Paste the URL + `Authorization` header into your client's MCP config. For a token that stays
+stable across restarts instead of regenerating each time, set `DOCFORGE_MCP_TOKEN` in `.env`.
+
+Run `docforge-mcp --help` for every flag (`--transport stdio|http|both`, `--host`, `--port`,
+`--token`, `--no-auth`).
+
+## Configuration
+
+Copy `.env.example` to `.env` to set these once instead of repeating flags. Precedence for
+every setting: **CLI flag > `.env`/environment variable > built-in default.**
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `DOCFORGE_DB` | manifest database path | `docforge.db` |
+| `QDRANT_URL` | Qdrant server (Docker/native/remote) | `http://localhost:6333` |
+| `QDRANT_PATH` | embedded Qdrant folder (no Docker) — wins over `QDRANT_URL` | unset |
+| `QDRANT_API_KEY` | API key for a remote/managed Qdrant | unset |
+| `DOCFORGE_EMBED_MODEL` | fastembed model — must match what you synced with | `BAAI/bge-small-en-v1.5` |
+| `DOCFORGE_MCP_TRANSPORT` | `docforge-mcp` default transport | `stdio` |
+| `DOCFORGE_MCP_TOKEN` | stable HTTP auth token (else one is generated per run) | unset |
+
+## Development
+
+```bash
+uv run ruff check .                          # lint
+uv run pytest                                # fast tests (no network/browser required)
+DOCFORGE_NETWORK_TESTS=1 uv run pytest       # include live-crawl integration tests
+```
+
+CI runs lint + the fast test suite on every push and PR (`.github/workflows/ci.yml`).
+
+Contributions are welcome — open an issue to discuss a change before sending a large PR.
+
+## Project status
+
+Change detection, RAG sync, the CLI, and the MCP server are all built and tested (see
+[`GUID.md`](GUID.md) for the full design history and reasoning behind each decision). Packaging
+the whole tool as a Docker image is next.
 
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
 
-Built on [Crawl4AI](https://github.com/unclecode/crawl4ai) (Apache-2.0) for crawling and HTML→Markdown conversion.
+Built on [Crawl4AI](https://github.com/unclecode/crawl4ai) (crawling, HTML→Markdown),
+[Qdrant](https://github.com/qdrant/qdrant) (vector store), [fastembed](https://github.com/qdrant/fastembed)
+(local embeddings), and the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).

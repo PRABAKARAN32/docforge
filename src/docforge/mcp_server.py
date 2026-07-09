@@ -10,28 +10,46 @@ Two tools:
   * ``list_docs()``               -- which knowledge bases exist, with page counts.
   * ``search_docs(name, query)``  -- the closest chunks in one knowledge base.
 
-Two transports, picked with ``--transport``:
+Three transport modes, picked with ``--transport``:
   * ``stdio`` (default) -- the client launches ``docforge-mcp`` itself as a subprocess and
-    talks over its stdin/stdout. No port, no URL. What Claude Desktop/Code expect
-    (`claude mcp add ...`). Nothing may ever be printed to stdout in this mode -- it would
-    corrupt the JSON-RPC stream -- which is why running it by hand just sits there silently.
+    talks over its stdin/stdout. No port, no URL, no token. What Claude Desktop/Code expect
+    (`claude mcp add ...`). This is inherently local and trusted -- the "client" is whoever
+    started the process -- so there's no network boundary to protect and no auth is applied.
   * ``http`` -- the server instead binds a port and serves plain HTTP, so anything that can
     make an HTTP request (a custom local-LLM agent, a different machine on the LAN) can
-    connect to it by URL instead of spawning it. Prints the URL to stdout on startup, since
-    stdout isn't part of the wire protocol in this mode.
+    connect to it by URL instead of spawning it. THIS is a real network boundary -- see auth
+    below.
+  * ``both`` -- runs stdio and http at once, in the same process against the same knowledge
+    bases. Useful if this process is itself spawned by a stdio client (Claude Code) but you
+    also want an HTTP port open for something else (LM Studio, a custom agent) at the same
+    time, instead of running two separate ``docforge-mcp`` processes.
+
+Nothing is ever printed to **stdout** for any mode that includes stdio (``stdio`` or ``both``)
+-- it would corrupt the JSON-RPC stream sent over stdout, which is why running plain ``stdio``
+by hand just sits there silently. Startup/status messages always go to **stderr** instead,
+which every MCP client treats as ordinary logs, never protocol.
+
+**Auth (http only):** set ``--token``/``DOCFORGE_MCP_TOKEN`` to require
+``Authorization: Bearer <token>`` on every HTTP request (checked with a constant-time
+comparison to avoid timing attacks). Without a token, anyone who can reach the port can read
+your knowledge bases -- fine on `127.0.0.1` for local-only use, but required if you ever bind
+`--host 0.0.0.0` (a loud warning fires if you don't set one).
 
 Run it with ``docforge-mcp`` (registered in ``pyproject.toml``).
 
 Design mirrors ``cli.py``: pure, injectable functions (``list_docs_text``,
 ``search_docs_text``) hold the logic and are unit-tested with fakes; :func:`build_server`
 wires them into MCP tools; :func:`main` wires real config (``.env``/env, via
-``docforge.config``, plus ``--transport``/``--host``/``--port``) and starts the server.
+``docforge.config``, plus ``--transport``/``--host``/``--port``/``--token``) and starts the
+server.
 """
 
 from __future__ import annotations
 
 import argparse
+import hmac
 import os
+import sys
 from collections.abc import Sequence
 
 from docforge.config import load_dotenv, open_store, resolve_settings, store_error_hint
@@ -41,6 +59,38 @@ from docforge.vectorstore import VectorStore
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+DEFAULT_TRANSPORT = "stdio"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class BearerAuthMiddleware:
+    """ASGI middleware requiring ``Authorization: Bearer <token>`` on every HTTP request.
+
+    Only wraps the ``http``/``both`` transport's web app -- stdio has no network boundary
+    (see the module docstring), so nothing to check there. Uses a constant-time comparison
+    (:func:`hmac.compare_digest`) so a mistyped token can't be brute-forced via response-time
+    differences.
+    """
+
+    def __init__(self, app, token: str) -> None:
+        self._app = app
+        self._expected = f"Bearer {token}"
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or ())
+        presented = headers.get(b"authorization", b"").decode("latin-1")
+        if not hmac.compare_digest(presented, self._expected):
+            from starlette.responses import JSONResponse
+
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+
+        await self._app(scope, receive, send)
 
 
 def list_docs_text(db_path: str) -> str:
@@ -158,29 +208,58 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Run the DocForge MCP server, exposing list_docs/search_docs to an LLM client.",
     )
     parser.add_argument(
-        "--transport", choices=["stdio", "http"], default=None,
-        help="stdio (default): the client launches this process itself, no URL. "
-        "http: bind a port and print a URL a client connects to directly "
+        "--transport", choices=["stdio", "http", "both"], default=None,
+        help="stdio (default): the client launches this process itself, no URL, no auth. "
+        "http: bind a port and print a URL a client connects to directly. "
+        "both: run stdio and http at once, in the same process "
         "(default: DOCFORGE_MCP_TRANSPORT env var, else stdio).",
     )
     parser.add_argument(
         "--host", default=None, metavar="HOST",
-        help=f"Bind address for --transport http (default: {DEFAULT_HOST}).",
+        help=f"Bind address for the http side (default: {DEFAULT_HOST}). Use 0.0.0.0 to accept "
+        "connections from other machines -- requires --token.",
     )
     parser.add_argument(
         "--port", type=int, default=None, metavar="PORT",
-        help=f"Bind port for --transport http (default: {DEFAULT_PORT}).",
+        help=f"Bind port for the http side (default: {DEFAULT_PORT}).",
+    )
+    parser.add_argument(
+        "--token", default=None, metavar="TOKEN",
+        help="Require 'Authorization: Bearer TOKEN' on http requests (default: "
+        "DOCFORGE_MCP_TOKEN env var, else no auth). Ignored for pure stdio. Generate one with: "
+        "python -c \"import secrets; print(secrets.token_urlsafe(32))\"",
     )
     return parser
+
+
+async def _serve_http_async(server, host: str, port: int, token: str | None) -> None:
+    """Serve the http side: :func:`FastMCP.streamable_http_app`, wrapped with auth if configured."""
+    import uvicorn
+
+    app = server.streamable_http_app()
+    if token:
+        app = BearerAuthMiddleware(app, token)
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    await uvicorn.Server(config).serve()
+
+
+async def _serve_both_async(server, host: str, port: int, token: str | None) -> None:
+    """Run stdio and http concurrently in this process, sharing the same server/tools."""
+    import anyio
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(server.run_stdio_async)
+        tg.start_soon(_serve_http_async, server, host, port, token)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     load_dotenv()  # let a local .env supply QDRANT_URL / DOCFORGE_DB / DOCFORGE_EMBED_MODEL / ...
     args = _build_parser().parse_args(argv)
     settings = resolve_settings()
-    transport = args.transport or os.getenv("DOCFORGE_MCP_TRANSPORT") or "stdio"
+    transport = args.transport or os.getenv("DOCFORGE_MCP_TRANSPORT") or DEFAULT_TRANSPORT
     host = args.host or DEFAULT_HOST
     port = args.port or DEFAULT_PORT
+    token = args.token or os.getenv("DOCFORGE_MCP_TOKEN")
 
     server = build_server(
         db_path=settings["db_path"],
@@ -197,9 +276,27 @@ def main(argv: Sequence[str] | None = None) -> None:
         server.run()  # never print here -- would corrupt the stdio JSON-RPC stream
         return
 
-    print(f"DocForge MCP server (http) listening at http://{host}:{port}/mcp")
-    print("Connect your MCP client to that URL. Ctrl+C to stop.")
-    server.run(transport="streamable-http")
+    # http or both: stdout is safe to use for stdio-only, but "both" also runs a stdio side
+    # in this same process -- so everything user-facing goes to stderr, never stdout, always.
+    if not token and host not in _LOOPBACK_HOSTS:
+        print(
+            f"WARNING: binding to {host} without --token / DOCFORGE_MCP_TOKEN -- anyone who "
+            "can reach this port can read your knowledge bases. Set a token.",
+            file=sys.stderr,
+        )
+    print(f"DocForge MCP server (http) listening at http://{host}:{port}/mcp", file=sys.stderr)
+    print(
+        "Authorization required: Bearer <token>" if token else "No token configured -- open access.",
+        file=sys.stderr,
+    )
+    print("Ctrl+C to stop.", file=sys.stderr)
+
+    import anyio
+
+    if transport == "http":
+        anyio.run(_serve_http_async, server, host, port, token)
+    else:
+        anyio.run(_serve_both_async, server, host, port, token)
 
 
 if __name__ == "__main__":

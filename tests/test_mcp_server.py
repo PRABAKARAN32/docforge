@@ -160,15 +160,21 @@ def test_parser_defaults_to_no_explicit_transport() -> None:
     assert args.transport is None  # main() resolves None -> env -> "stdio"
     assert args.host is None
     assert args.port is None
+    assert args.token is None
 
 
-def test_parser_accepts_transport_host_port() -> None:
+def test_parser_accepts_transport_host_port_token() -> None:
     args = _build_parser().parse_args(
-        ["--transport", "http", "--host", "0.0.0.0", "--port", "9001"]
+        ["--transport", "http", "--host", "0.0.0.0", "--port", "9001", "--token", "secret"]
     )
     assert args.transport == "http"
     assert args.host == "0.0.0.0"
     assert args.port == 9001
+    assert args.token == "secret"
+
+
+def test_parser_accepts_both_transport() -> None:
+    assert _build_parser().parse_args(["--transport", "both"]).transport == "both"
 
 
 def test_parser_rejects_unknown_transport() -> None:
@@ -189,21 +195,148 @@ def test_main_stdio_never_prints(tmp_path, monkeypatch, capsys) -> None:
 
     mcp_server_module.main([])
 
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
-def test_main_http_prints_the_url(tmp_path, monkeypatch, capsys) -> None:
+def test_main_http_dispatches_and_logs_to_stderr_not_stdout(tmp_path, monkeypatch, capsys) -> None:
     import docforge.mcp_server as mcp_server_module
 
     monkeypatch.chdir(tmp_path)
-    calls: list[str] = []
-    fake_server = type(
-        "FakeServer", (), {"run": lambda self, transport="stdio": calls.append(transport)}
-    )()
-    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: fake_server)
+    calls: list[tuple] = []
+
+    async def fake_serve_http(server, host, port, token):
+        calls.append((host, port, token))
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_http_async", fake_serve_http)
 
     mcp_server_module.main(["--transport", "http", "--port", "9001"])
 
-    assert calls == ["streamable-http"]
-    out = capsys.readouterr().out
-    assert "http://127.0.0.1:9001/mcp" in out
+    assert calls == [("127.0.0.1", 9001, None)]
+    captured = capsys.readouterr()
+    assert captured.out == ""  # nothing ever goes to stdout for http/both
+    assert "http://127.0.0.1:9001/mcp" in captured.err
+    assert "No token configured" in captured.err
+
+
+def test_main_http_with_token_skips_the_open_access_message(tmp_path, monkeypatch, capsys) -> None:
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+    calls: list[tuple] = []
+
+    async def fake_serve_http(server, host, port, token):
+        calls.append((host, port, token))
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_http_async", fake_serve_http)
+
+    mcp_server_module.main(["--transport", "http", "--token", "secret"])
+
+    assert calls == [("127.0.0.1", 8000, "secret")]
+    err = capsys.readouterr().err
+    assert "Authorization required" in err
+    assert "No token configured" not in err
+    assert "WARNING" not in err  # loopback host -> no nudge needed
+
+
+def test_main_warns_when_binding_non_loopback_without_token(tmp_path, monkeypatch, capsys) -> None:
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+
+    async def fake_serve_http(server, host, port, token):
+        pass
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_http_async", fake_serve_http)
+
+    mcp_server_module.main(["--transport", "http", "--host", "0.0.0.0"])
+
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_main_both_dispatches_to_serve_both_async(tmp_path, monkeypatch, capsys) -> None:
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+    calls: list[tuple] = []
+
+    async def fake_serve_both(server, host, port, token):
+        calls.append((host, port, token))
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_both_async", fake_serve_both)
+
+    mcp_server_module.main(["--transport", "both", "--token", "secret"])
+
+    assert calls == [("127.0.0.1", 8000, "secret")]
+
+
+# --- BearerAuthMiddleware (raw ASGI, no starlette test client needed) ---
+
+
+def _http_scope(auth_header: str | None) -> dict:
+    headers = [(b"authorization", auth_header.encode())] if auth_header is not None else []
+    return {"type": "http", "headers": headers}
+
+
+def test_bearer_auth_rejects_missing_header() -> None:
+    from docforge.mcp_server import BearerAuthMiddleware
+
+    async def app(scope, receive, send):
+        raise AssertionError("inner app must not run when unauthorized")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(BearerAuthMiddleware(app, "secret")(_http_scope(None), None, send))
+
+    assert sent[0]["status"] == 401
+
+
+def test_bearer_auth_rejects_wrong_token() -> None:
+    from docforge.mcp_server import BearerAuthMiddleware
+
+    async def app(scope, receive, send):
+        raise AssertionError("inner app must not run when unauthorized")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(BearerAuthMiddleware(app, "secret")(_http_scope("Bearer wrong"), None, send))
+
+    assert sent[0]["status"] == 401
+
+
+def test_bearer_auth_allows_correct_token() -> None:
+    from docforge.mcp_server import BearerAuthMiddleware
+
+    called = []
+
+    async def app(scope, receive, send):
+        called.append(True)
+
+    asyncio.run(BearerAuthMiddleware(app, "secret")(_http_scope("Bearer secret"), None, None))
+
+    assert called == [True]
+
+
+def test_bearer_auth_passes_through_non_http_scopes() -> None:
+    """Lifespan/other ASGI scopes aren't HTTP requests -- must never be auth-gated."""
+    from docforge.mcp_server import BearerAuthMiddleware
+
+    called = []
+
+    async def app(scope, receive, send):
+        called.append(True)
+
+    asyncio.run(BearerAuthMiddleware(app, "secret")({"type": "lifespan"}, None, None))
+
+    assert called == [True]

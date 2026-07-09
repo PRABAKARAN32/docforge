@@ -30,11 +30,13 @@ Nothing is ever printed to **stdout** for any mode that includes stdio (``stdio`
 by hand just sits there silently. Startup/status messages always go to **stderr** instead,
 which every MCP client treats as ordinary logs, never protocol.
 
-**Auth (http only):** set ``--token``/``DOCFORGE_MCP_TOKEN`` to require
-``Authorization: Bearer <token>`` on every HTTP request (checked with a constant-time
-comparison to avoid timing attacks). Without a token, anyone who can reach the port can read
-your knowledge bases -- fine on `127.0.0.1` for local-only use, but required if you ever bind
-`--host 0.0.0.0` (a loud warning fires if you don't set one).
+**Auth (http only) is secure by default.** If you don't set ``--token``/``DOCFORGE_MCP_TOKEN``,
+the server generates a fresh random token itself on every start (like Jupyter Notebook does)
+and prints it -- ``Authorization: Bearer <token>`` is then required on every HTTP request
+(checked with a constant-time comparison to avoid timing attacks). The generated token is never
+written anywhere; restarting the server gets a *new* one. For a token that stays stable across
+restarts (so a client config doesn't need updating every time), set ``DOCFORGE_MCP_TOKEN``
+yourself. To run with no auth at all (open access), pass ``--no-auth`` explicitly.
 
 Run it with ``docforge-mcp`` (registered in ``pyproject.toml``).
 
@@ -231,14 +233,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--transport", choices=["stdio", "http", "both"], default=None,
         help="stdio (default): the client launches this process itself, no URL, no auth. "
-        "http: bind a port and print a URL a client connects to directly. "
+        "http: bind a port and print a URL + auth token a client connects to directly. "
         "both: run stdio and http at once, in the same process "
         "(default: DOCFORGE_MCP_TRANSPORT env var, else stdio).",
     )
     parser.add_argument(
         "--host", default=None, metavar="HOST",
         help=f"Bind address for the http side (default: {DEFAULT_HOST}). Use 0.0.0.0 to accept "
-        "connections from other machines -- requires --token.",
+        "connections from other machines -- strongly discouraged with --no-auth.",
     )
     parser.add_argument(
         "--port", type=int, default=None, metavar="PORT",
@@ -247,8 +249,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--token", default=None, metavar="TOKEN",
         help="Require 'Authorization: Bearer TOKEN' on http requests (default: "
-        "DOCFORGE_MCP_TOKEN env var, else no auth). Ignored for pure stdio. Generate one with: "
-        "python -c \"import secrets; print(secrets.token_urlsafe(32))\"",
+        "DOCFORGE_MCP_TOKEN env var, else a fresh token is generated and printed each run). "
+        "Ignored for pure stdio.",
+    )
+    parser.add_argument(
+        "--no-auth", action="store_true",
+        help="Run http with no authorization check at all (open access). Only the explicit "
+        "opt-out for this -- by default a token is always required.",
     )
     return parser
 
@@ -273,6 +280,21 @@ async def _serve_both_async(server, host: str, port: int, token: str | None) -> 
         tg.start_soon(_serve_http_async, server, host, port, token)
 
 
+def _resolve_token(explicit: str | None, *, no_auth: bool) -> tuple[str | None, bool]:
+    """Resolve the http auth token: explicit > generated > none (--no-auth).
+
+    Returns ``(token, generated)`` -- ``generated`` is True only when a token was minted here
+    (not user-supplied), so the caller knows whether to print "generate a new one on restart".
+    """
+    if no_auth:
+        return None, False
+    if explicit:
+        return explicit, False
+    import secrets
+
+    return secrets.token_urlsafe(32), True
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     load_dotenv()  # let a local .env supply QDRANT_URL / DOCFORGE_DB / DOCFORGE_EMBED_MODEL / ...
     args = _build_parser().parse_args(argv)
@@ -280,7 +302,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     transport = args.transport or os.getenv("DOCFORGE_MCP_TRANSPORT") or DEFAULT_TRANSPORT
     host = args.host or DEFAULT_HOST
     port = args.port or DEFAULT_PORT
-    token = args.token or os.getenv("DOCFORGE_MCP_TOKEN")
 
     server = build_server(
         db_path=settings["db_path"],
@@ -297,19 +318,32 @@ def main(argv: Sequence[str] | None = None) -> None:
         server.run()  # never print here -- would corrupt the stdio JSON-RPC stream
         return
 
+    # Only http/both ever need a token -- resolved (and possibly generated) here, not for stdio.
+    token, token_generated = _resolve_token(
+        args.token or os.getenv("DOCFORGE_MCP_TOKEN"), no_auth=args.no_auth
+    )
+
     # http or both: stdout is safe to use for stdio-only, but "both" also runs a stdio side
     # in this same process -- so everything user-facing goes to stderr, never stdout, always.
-    if not token and host not in _LOOPBACK_HOSTS:
+    if token is None and host not in _LOOPBACK_HOSTS:
         print(
-            f"WARNING: binding to {host} without --token / DOCFORGE_MCP_TOKEN -- anyone who "
-            "can reach this port can read your knowledge bases. Set a token.",
+            f"WARNING: binding to {host} with --no-auth -- anyone who can reach this port "
+            "can read your knowledge bases.",
             file=sys.stderr,
         )
     print(f"DocForge MCP server (http) listening at http://{host}:{port}/mcp", file=sys.stderr)
-    print(
-        "Authorization required: Bearer <token>" if token else "No token configured -- open access.",
-        file=sys.stderr,
-    )
+    if token is None:
+        print("No token configured (--no-auth) -- open access.", file=sys.stderr)
+    elif token_generated:
+        print(f"Auth token (generated fresh this run): {token}", file=sys.stderr)
+        print(f"Authorization header: Bearer {token}", file=sys.stderr)
+        print(
+            "This token is NOT saved -- restarting the server generates a new one. Set "
+            "DOCFORGE_MCP_TOKEN in .env for a token that stays the same across restarts.",
+            file=sys.stderr,
+        )
+    else:
+        print("Authorization required: Bearer <token>", file=sys.stderr)
     print("Ctrl+C to stop.", file=sys.stderr)
 
     import anyio

@@ -129,6 +129,8 @@ def test_parser_accepts_qdrant_path_and_embed_model() -> None:
     )
     assert args.qdrant_path == "./vec"
     assert args.embed_model == "BAAI/bge-base-en-v1.5"
+    # parser default is None; main() resolves flag > DOCFORGE_EMBED_MODEL env > DEFAULT_MODEL
+    assert _build_parser().parse_args(["sync", "https://d/"]).embed_model is None
     assert args.qdrant_url is None  # parser default is None; main resolves flag>env>localhost
 
 
@@ -328,6 +330,29 @@ def test_load_dotenv_sets_missing_but_not_existing(tmp_path, monkeypatch) -> Non
     assert os.environ["QDRANT_URL"] == "https://x.cloud.qdrant.io:6333"  # quotes stripped
     assert os.environ["DOCFORGE_DB"] == "SqlDB/docforge.db"  # export prefix handled
     assert os.environ["QDRANT_API_KEY"] == "real_env"  # existing env not overridden
+
+
+def test_embed_model_resolution_precedence(tmp_path, monkeypatch) -> None:
+    """main() resolves --embed-model as flag > DOCFORGE_EMBED_MODEL env > DEFAULT_MODEL."""
+    import docforge.cli as cli_module
+    from docforge.embedder import DEFAULT_MODEL
+
+    monkeypatch.chdir(tmp_path)  # no .env here -> isolates from the real project's .env
+    monkeypatch.delenv("DOCFORGE_EMBED_MODEL", raising=False)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        cli_module, "run_sync", lambda *a, embed_model=None, **kw: seen.append(embed_model) or 0
+    )
+
+    cli_module.main(["sync", "https://d/"])
+    assert seen[-1] == DEFAULT_MODEL  # no flag, no env -> built-in default
+
+    monkeypatch.setenv("DOCFORGE_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+    cli_module.main(["sync", "https://d/"])
+    assert seen[-1] == "BAAI/bge-base-en-v1.5"  # env used when no flag
+
+    cli_module.main(["sync", "https://d/", "--embed-model", "BAAI/bge-large-en-v1.5"])
+    assert seen[-1] == "BAAI/bge-large-en-v1.5"  # flag wins over env
 
 
 def test_bfs_enabled_but_no_pages_found() -> None:

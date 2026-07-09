@@ -21,6 +21,10 @@ from collections.abc import Sequence
 
 from docforge import __version__
 from docforge.conditional import http_conditional_get
+from docforge.config import load_dotenv as _load_dotenv
+from docforge.config import open_store as _open_store
+from docforge.config import resolve_settings
+from docforge.config import store_error_hint as _store_error_hint
 from docforge.crawler import DEFAULT_BASE_DELAY, DEFAULT_CONCURRENCY, CrawledPage, crawl_urls
 from docforge.detector import Crawler, apply_changes, detect_changes
 from docforge.diff import deletions_to_apply
@@ -35,32 +39,6 @@ from docforge.vectorstore import VectorStore
 # (resolve from the --conditional/--force flags).
 _UNSET = object()
 
-
-def _load_dotenv(path: str = ".env") -> None:
-    """Load ``KEY=VALUE`` lines from a ``.env`` file into the environment (dependency-free).
-
-    Existing environment variables win, so a real ``export`` overrides ``.env``. Blank lines,
-    ``#`` comments, an optional ``export`` prefix, and surrounding quotes are handled.
-    """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return  # no .env file -> nothing to load
-
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        line = line.removeprefix("export ").strip()
-        key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            os.environ.setdefault(key, value)
-
 # Colorful help via rich-argparse, with a plain fallback if it isn't installed. It preserves
 # the raw examples epilog and auto-disables color when output isn't a terminal (pipes/CI).
 try:
@@ -73,39 +51,6 @@ try:
     _HelpFormatter.styles["argparse.help"] = "default"
 except ImportError:  # pragma: no cover -- fallback keeps help working without the dep
     _HelpFormatter = argparse.RawDescriptionHelpFormatter
-
-
-def _open_store(
-    qdrant_url: str,
-    qdrant_path: str | None,
-    api_key: str | None = None,
-    timeout: float = 60.0,
-    collection: str = "docforge",
-):
-    """Open the Qdrant store for ``collection`` (one per knowledge base).
-
-    Embedded (--qdrant-path) if given, else the server URL. ``api_key`` authenticates to a
-    remote/managed Qdrant (e.g. Qdrant Cloud); ``timeout`` (seconds) covers server requests.
-    """
-    from docforge.vectorstore import QdrantVectorStore
-
-    if qdrant_path is not None:
-        return QdrantVectorStore(path=qdrant_path, collection=collection)
-    return QdrantVectorStore(
-        url=qdrant_url, api_key=api_key, timeout=timeout, collection=collection
-    )
-
-
-def _store_error_hint(qdrant_url: str, qdrant_path: str | None) -> str:
-    """A hint tailored to how the user is connecting (local Docker vs. remote/cloud)."""
-    if qdrant_path is not None:
-        return f"Could not open the embedded vector store at {qdrant_path}."
-    if "localhost" in qdrant_url or "127.0.0.1" in qdrant_url:
-        return f"Is Qdrant running? Start it with: docker compose up -d  (expected at {qdrant_url})"
-    return (
-        f"Could not reach the vector store at {qdrant_url}. Check the URL, that QDRANT_API_KEY "
-        "is set/correct, your network, and try a larger --qdrant-timeout for a distant cluster."
-    )
 
 
 def run_sync(
@@ -582,8 +527,9 @@ def _add_vector_store_flags(sub: argparse.ArgumentParser) -> None:
 def _add_embedding_flags(sub: argparse.ArgumentParser) -> None:
     group = sub.add_argument_group("embedding")
     group.add_argument(
-        "--embed-model", default=DEFAULT_MODEL, metavar="NAME",
-        help=f"fastembed model name for embeddings (default: {DEFAULT_MODEL}).",
+        "--embed-model", default=None, metavar="NAME",
+        help="fastembed model name for embeddings "
+        f"(default: DOCFORGE_EMBED_MODEL env var, else {DEFAULT_MODEL}).",
     )
     group.add_argument(
         "--device", choices=["auto", "cpu", "cuda"], default=DEFAULT_DEVICE,
@@ -708,7 +654,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    _load_dotenv()  # let a local .env supply QDRANT_URL / QDRANT_API_KEY / DOCFORGE_DB / QDRANT_PATH
+    # let a local .env supply QDRANT_URL / QDRANT_API_KEY / DOCFORGE_DB / QDRANT_PATH / DOCFORGE_EMBED_MODEL
+    _load_dotenv()
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -717,11 +664,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     # Config resolution, in precedence order: explicit flag > .env/env var > built-in default.
-    db_path = getattr(args, "db", None) or os.getenv("DOCFORGE_DB") or "docforge.db"
-    qdrant_url = getattr(args, "qdrant_url", None) or os.getenv("QDRANT_URL") or "http://localhost:6333"
-    qdrant_path = getattr(args, "qdrant_path", None) or os.getenv("QDRANT_PATH")
-    api_key = getattr(args, "qdrant_api_key", None) or os.getenv("QDRANT_API_KEY")
-    timeout = getattr(args, "qdrant_timeout", 60.0)
+    # (shared with the MCP server via docforge.config.resolve_settings)
+    settings = resolve_settings(
+        db_path=getattr(args, "db", None),
+        qdrant_url=getattr(args, "qdrant_url", None),
+        qdrant_path=getattr(args, "qdrant_path", None),
+        qdrant_api_key=getattr(args, "qdrant_api_key", None),
+        qdrant_timeout=getattr(args, "qdrant_timeout", None),
+        embed_model=getattr(args, "embed_model", None),
+    )
+    db_path = settings["db_path"]
+    qdrant_url = settings["qdrant_url"]
+    qdrant_path = settings["qdrant_path"]
+    api_key = settings["qdrant_api_key"]
+    timeout = settings["qdrant_timeout"]
+    embed_model = settings["embed_model"]
 
     if args.command in ("sync", "diff"):
         base_delay = tuple(args.crawl_delay) if args.crawl_delay else DEFAULT_BASE_DELAY
@@ -739,7 +696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_path=qdrant_path,
             qdrant_api_key=api_key,
             qdrant_timeout=timeout,
-            embed_model=args.embed_model,
+            embed_model=embed_model,
             device=args.device,
             conditional_mode=args.conditional,
             force=args.force,
@@ -769,7 +726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qdrant_path=qdrant_path,
             qdrant_api_key=api_key,
             qdrant_timeout=timeout,
-            embed_model=args.embed_model,
+            embed_model=embed_model,
             device=args.device,
             limit=args.limit,
         )

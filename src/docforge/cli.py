@@ -291,7 +291,12 @@ def run_search(
             hits = []
             for collection in collections:
                 bound = _open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, collection)
-                hits.extend(bound.search(vector, limit=limit))
+                try:
+                    hits.extend(bound.search(vector, limit=limit))
+                finally:
+                    # Embedded (--qdrant-path) mode locks the whole storage folder per client --
+                    # must close before opening the next collection, or the 2nd+ one crashes.
+                    bound.close()
             hits.sort(key=lambda hit: hit.score, reverse=True)
             hits = hits[:limit]
     except Exception as exc:  # noqa: BLE001 -- clean message instead of a traceback

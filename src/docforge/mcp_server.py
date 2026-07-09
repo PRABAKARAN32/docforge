@@ -7,8 +7,9 @@ embed-query-then-search path as ``docforge search``; ``list_docs`` reads the sam
 to retrieval only (crawling stays a CLI-only operation).
 
 Two tools:
-  * ``list_docs()``               -- which knowledge bases exist, with page counts.
-  * ``search_docs(name, query)``  -- the closest chunks in one knowledge base.
+  * ``list_docs()``                     -- which knowledge bases exist, with page counts.
+  * ``search_docs(query, name=None)``   -- the closest chunks; ``name`` scopes to one
+    knowledge base, omitted searches all of them at once (mirrors ``docforge search``).
 
 Three transport modes, picked with ``--transport``:
   * ``stdio`` (default) -- the client launches ``docforge-mcp`` itself as a subprocess and
@@ -106,10 +107,11 @@ def list_docs_text(db_path: str) -> str:
 
 
 def search_docs_text(
-    name: str,
     query: str,
     *,
+    name: str | None = None,
     limit: int = 5,
+    db_path: str,
     qdrant_url: str,
     qdrant_path: str | None,
     qdrant_api_key: str | None,
@@ -119,10 +121,11 @@ def search_docs_text(
     embedder: Embedder | None = None,
     store: VectorStore | None = None,
 ) -> str:
-    """Search one knowledge base and return the closest chunks, formatted as text.
+    """Search one knowledge base (``name``) or all of them (``name=None``), as text.
 
-    Mirrors ``run_search`` in ``cli.py`` (same embed-then-search path), scoped to a single
-    named collection since an LLM tool call names the knowledge base explicitly.
+    Mirrors ``run_search`` in ``cli.py`` exactly (same embed-then-search path, same
+    search-all-by-default behavior) so a model doesn't need to call ``list_docs`` first just
+    to search -- only when it wants to scope to one specific knowledge base.
     """
     try:
         if embedder is None:
@@ -130,17 +133,33 @@ def search_docs_text(
 
             embedder = FastEmbedEmbedder(embed_model, device=device)
         vector = embedder.embed([query])[0]
-        bound = (
-            store
-            if store is not None
-            else open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, name)
-        )
-        hits = list(bound.search(vector, limit=limit))
+
+        if store is not None:
+            hits = list(store.search(vector, limit=limit))
+        else:
+            if name:
+                collections = [name]
+            else:
+                with Manifest(db_path) as manifest:
+                    collections = sorted(manifest.names())
+                if not collections:
+                    return f"No knowledge bases tracked in {db_path}. Run `docforge sync <url>` first."
+            hits = []
+            for collection in collections:
+                bound = open_store(qdrant_url, qdrant_path, qdrant_api_key, qdrant_timeout, collection)
+                try:
+                    hits.extend(bound.search(vector, limit=limit))
+                finally:
+                    # Embedded (--qdrant-path) mode locks the whole storage folder per client --
+                    # must close before opening the next collection, or the 2nd+ one crashes.
+                    bound.close()
+            hits.sort(key=lambda hit: hit.score, reverse=True)
+            hits = hits[:limit]
     except Exception as exc:  # noqa: BLE001 -- surface a clean message to the model, not a traceback
         return f"Search failed: {exc}\n{store_error_hint(qdrant_url, qdrant_path)}"
 
     if not hits:
-        return f"No results in knowledge base {name!r}."
+        return f"No results in knowledge base {name!r}." if name else "No results."
 
     parts = [f"[{hit.score:.3f}] {hit.source_url}\n{hit.text.strip()}" for hit in hits]
     return "\n\n".join(parts)
@@ -179,18 +198,20 @@ def build_server(
         return list_docs_text(db_path)
 
     @server.tool()
-    def search_docs(name: str, query: str, limit: int = 5) -> str:
-        """Search a knowledge base and return the closest matching documentation chunks.
+    def search_docs(query: str, name: str | None = None, limit: int = 5) -> str:
+        """Search documentation and return the closest matching chunks.
 
         Args:
-            name: The knowledge base to search (see list_docs for exact names).
             query: What to search for, in natural language.
+            name: Restrict the search to one knowledge base (see list_docs for exact names).
+                Omit to search across every knowledge base at once.
             limit: Maximum number of chunks to return (default 5).
         """
         return search_docs_text(
-            name,
             query,
+            name=name,
             limit=limit,
+            db_path=db_path,
             qdrant_url=qdrant_url,
             qdrant_path=qdrant_path,
             qdrant_api_key=qdrant_api_key,

@@ -253,6 +253,37 @@ def test_search_prints_hits() -> None:
     assert any("https://d/a" in line for line in lines)
 
 
+def test_search_all_kbs_with_embedded_qdrant_path(tmp_path) -> None:
+    """Regression test: embedded Qdrant (--qdrant-path) locks its storage folder per client,
+    so the default search-all-KBs path used to crash opening the 2nd+ collection without
+    closing the previous one ('already accessed by another instance of Qdrant client')."""
+    from docforge.vectorstore import QdrantVectorStore
+
+    db = str(tmp_path / "d.db")
+    qdrant_path = str(tmp_path / "vectors")
+    with Manifest(db) as m:
+        m.upsert_page("docker", "https://docker/x", "h1")
+        m.upsert_page("nginx", "https://nginx/y", "h2")
+
+    for collection, url, text in [
+        ("docker", "https://docker/x", "install docker with apt"),
+        ("nginx", "https://nginx/y", "install nginx with apt"),
+    ]:
+        store = QdrantVectorStore(path=qdrant_path, collection=collection)
+        store.ensure_collection(4)
+        store.upsert_chunks([Chunk(url, 0, text)], [[1.0, 0.0, 0.0, 0.0]])
+        store.close()
+
+    lines: list[str] = []
+    code = run_search(
+        "install", db_path=db, qdrant_path=qdrant_path, embedder=FakeEmbedder(), out=lines.append
+    )
+
+    assert code == 0
+    assert any("https://docker/x" in line for line in lines)
+    assert any("https://nginx/y" in line for line in lines)
+
+
 # --- remove ---
 
 def test_remove_deletes_a_whole_knowledge_base(tmp_path) -> None:

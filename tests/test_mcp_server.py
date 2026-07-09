@@ -65,7 +65,7 @@ def test_search_docs_text_returns_hits() -> None:
     store.upsert_chunks([Chunk("https://d/a", 0, "install with pip")], [[1.0, 0.0, 0.0, 0.0]])
 
     text = search_docs_text(
-        "docker", "how to install",
+        "how to install", name="docker", db_path="unused",
         qdrant_url="unused", qdrant_path=None, qdrant_api_key=None, qdrant_timeout=60.0,
         embed_model="unused", embedder=FakeEmbedder(), store=store,
     )
@@ -79,7 +79,7 @@ def test_search_docs_text_no_results() -> None:
     store.ensure_collection(4)
 
     text = search_docs_text(
-        "docker", "anything",
+        "anything", name="docker", db_path="unused",
         qdrant_url="unused", qdrant_path=None, qdrant_api_key=None, qdrant_timeout=60.0,
         embed_model="unused", embedder=FakeEmbedder(), store=store,
     )
@@ -93,13 +93,53 @@ def test_search_docs_text_reports_store_errors_cleanly() -> None:
             raise RuntimeError("connection refused")
 
     text = search_docs_text(
-        "docker", "anything",
+        "anything", name="docker", db_path="unused",
         qdrant_url="http://localhost:6333", qdrant_path=None, qdrant_api_key=None,
         qdrant_timeout=60.0, embed_model="unused", embedder=FakeEmbedder(), store=BrokenStore(),
     )
 
     assert "Search failed" in text
     assert "connection refused" in text
+
+
+def test_search_docs_text_searches_all_kbs_when_name_omitted(tmp_path) -> None:
+    """Mirrors docforge search's default (--all) behavior, and is a regression test for a real
+    bug: embedded Qdrant (--qdrant-path) locks its storage folder per client, so searching a
+    2nd+ collection without closing the previous one crashed with 'already accessed by another
+    instance of Qdrant client'."""
+    db = str(tmp_path / "d.db")
+    qdrant_path = str(tmp_path / "vectors")
+    with Manifest(db) as m:
+        m.upsert_page("docker", "https://docker/x", "h1")
+        m.upsert_page("nginx", "https://nginx/y", "h2")
+
+    for collection, url, text in [
+        ("docker", "https://docker/x", "install docker with apt"),
+        ("nginx", "https://nginx/y", "install nginx with apt"),
+    ]:
+        store = QdrantVectorStore(path=qdrant_path, collection=collection)
+        store.ensure_collection(4)
+        store.upsert_chunks([Chunk(url, 0, text)], [[1.0, 0.0, 0.0, 0.0]])
+        store.close()
+
+    text = search_docs_text(
+        "install", db_path=db,
+        qdrant_url="unused", qdrant_path=qdrant_path, qdrant_api_key=None, qdrant_timeout=60.0,
+        embed_model="unused", embedder=FakeEmbedder(),
+    )
+
+    assert "https://docker/x" in text
+    assert "https://nginx/y" in text
+
+
+def test_search_docs_text_no_kbs_at_all(tmp_path) -> None:
+    text = search_docs_text(
+        "anything", db_path=str(tmp_path / "empty.db"),
+        qdrant_url="unused", qdrant_path=None, qdrant_api_key=None, qdrant_timeout=60.0,
+        embed_model="unused", embedder=FakeEmbedder(),
+    )
+
+    assert "No knowledge bases tracked" in text
 
 
 # --- build_server ---
@@ -114,6 +154,20 @@ def test_build_server_registers_both_tools(tmp_path) -> None:
     tools = {tool.name for tool in asyncio.run(server.list_tools())}
 
     assert tools == {"list_docs", "search_docs"}
+
+
+def test_build_server_search_docs_name_is_optional_in_the_tool_schema(tmp_path) -> None:
+    """A model must be able to call search_docs(query=...) alone -- name is a refinement,
+    not a required first step (that's the whole point of the search-all default)."""
+    server = build_server(
+        db_path=str(tmp_path / "d.db"), qdrant_url="http://localhost:6333", qdrant_path=None,
+        qdrant_api_key=None, qdrant_timeout=60.0, embed_model="unused",
+    )
+
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    schema = tools["search_docs"].inputSchema
+
+    assert schema["required"] == ["query"]
 
 
 def test_build_server_list_docs_tool_call_reads_the_manifest(tmp_path) -> None:

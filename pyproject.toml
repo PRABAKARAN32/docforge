@@ -7,10 +7,11 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "Prabakaran" }]
 dependencies = [
-    "crawl4ai>=0.9.0",  # M1: crawls docs sites and converts HTML -> clean markdown
-    "fastembed>=0.3",   # M2: lightweight local embeddings (ONNX, no torch)
-    "qdrant-client>=1.7",  # M2: client for the Qdrant vector store
-    "rich-argparse>=1.5",  # colorful --help (rich is already a transitive dep)
+    "crawl4ai>=0.9.0", # M1: crawls docs sites and converts HTML -> clean markdown
+    "fastembed>=0.3", # M2: lightweight local embeddings (ONNX, no torch)
+    "mcp>=1.28.1", # M4: MCP server (stdio) exposing search_docs/list_docs to LLM clients
+    "qdrant-client>=1.7", # M2: client for the Qdrant vector store
+    "rich-argparse>=1.5", # colorful --help (rich is already a transitive dep)
 ]
 
 # Dev-only tools (PEP 735). Not published to PyPI; installed by default via `uv sync`.
@@ -18,8 +19,10 @@ dependencies = [
 dev = ["pytest", "ruff"]
 
 # The `docforge` terminal command (M3), wired to cli.main().
+# `docforge-mcp` (M4) runs the MCP server (stdio) for an LLM client to launch as a subprocess.
 [project.scripts]
 docforge = "docforge.cli:main"
+docforge-mcp = "docforge.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,11 +1,27 @@
 [project]
-name = "docforge"
-version = "0.1.0"
+name = "pydocforge"
+dynamic = ["version"]
 description = "Keeps a documentation RAG in sync by detecting and updating only what changed."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "Prabakaran" }]
+keywords = [
+    "rag", "documentation", "knowledge-base", "vector-search", "embeddings",
+    "qdrant", "mcp", "crawler", "semantic-search",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Indexing",
+]
 dependencies = [
     "crawl4ai>=0.9.0", # crawls docs sites and converts HTML -> clean markdown
     "fastembed>=0.3", # lightweight local embeddings (ONNX, no torch)
@@ -25,9 +41,26 @@ dev = ["pytest", "ruff"]
 docforge = "docforge.cli:main"
 docforge-mcp = "docforge.mcp_server:main"
 
+# Shown on the PyPI project sidebar.
+[project.urls]
+Homepage = "https://github.com/PRABAKARAN32/docforge"
+Repository = "https://github.com/PRABAKARAN32/docforge"
+Documentation = "https://github.com/PRABAKARAN32/docforge/tree/main/Docs"
+Issues = "https://github.com/PRABAKARAN32/docforge/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Single-source the version from src/docforge/__init__.py (__version__), so the package and the
+# published distribution can never drift apart.
+[tool.hatch.version]
+path = "src/docforge/__init__.py"
+
+# The install name is `pydocforge`, but the import package is `docforge` -- tell hatchling which
+# directory to ship, since it can't infer it from a mismatched project name.
+[tool.hatch.build.targets.wheel]
+packages = ["src/docforge"]
 
 [tool.ruff]
 line-length = 100

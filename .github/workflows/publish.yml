@@ -1,0 +1,43 @@
+name: Publish to PyPI
+
+# Publishes pydocforge to PyPI whenever you cut a GitHub Release. Uses PyPI Trusted Publishing
+# (OIDC): GitHub proves this workflow's identity to PyPI directly, so there is NO token or
+# password stored anywhere. Set the trusted publisher up once on PyPI first (see Notes/PyPI.md):
+#   PyPI -> Manage -> Publishing -> add a publisher matching owner/repo/workflow/environment below.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Must match the environment named in the PyPI trusted-publisher config.
+    environment: pypi
+    permissions:
+      id-token: write # REQUIRED: lets GitHub mint the OIDC token PyPI verifies. Without it, auth fails.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      # Guard: never publish a build whose version doesn't match the release tag (e.g. tag v0.2.0
+      # but __version__ still 0.1.0). Compares the tag to the built distribution's version.
+      - name: Build
+        run: uv build
+
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(ls dist/pydocforge-*.tar.gz | sed -E 's/.*pydocforge-(.*)\.tar\.gz/\1/')
+          echo "release tag: $tag / package version: $pkg"
+          test "$tag" = "$pkg" || { echo "::error::tag ($tag) != package version ($pkg) -- bump __version__ in src/docforge/__init__.py"; exit 1; }
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      # No token: uv detects it's in GitHub Actions with id-token permission and uses OIDC.
+      - name: Publish to PyPI (Trusted Publishing)
+        run: uv publish --trusted-publishing always

@@ -1,6 +1,7 @@
 # DocForge
 
 [![CI](https://github.com/PRABAKARAN32/docforge/actions/workflows/ci.yml/badge.svg)](https://github.com/PRABAKARAN32/docforge/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pydocforge.svg)](https://pypi.org/project/pydocforge/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
@@ -94,7 +95,36 @@ Full module-by-module breakdown: [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md).
 
 ## Install
 
-Requires **Python 3.11+** and [uv](https://docs.astral.sh/uv/).
+Requires **Python 3.11+**.
+
+### From PyPI — to *use* the tool
+
+```bash
+pip install pydocforge          # or:  uv tool install pydocforge  /  pipx install pydocforge
+```
+
+Then, one-time, install the headless browser Crawl4AI needs to crawl:
+
+```bash
+python -m playwright install chromium
+```
+
+Both the `docforge` and `docforge-mcp` commands are now on your `PATH`:
+
+```bash
+docforge --help
+```
+
+> **Why `pydocforge`, but the command is `docforge`?** The short name `docforge` was already
+> taken on PyPI, so the install/distribution name is **`pydocforge`** — but the commands it
+> installs are **`docforge`** and **`docforge-mcp`** (like `pip install python-dateutil` gives
+> you `import dateutil`). Pick the install form that fits: `uv add pydocforge` adds it as a
+> dependency to a project; `uv tool install pydocforge` / `pipx install pydocforge` install the
+> CLI globally; `uvx --from pydocforge docforge …` runs it once without installing.
+
+### From source — to *develop* it
+
+Uses [uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/PRABAKARAN32/docforge.git
@@ -103,12 +133,11 @@ uv sync                       # creates .venv, installs everything from uv.lock
 uv run playwright install chromium   # one-time: the headless browser Crawl4AI needs
 ```
 
-> **Running the commands:** `uv sync` installs the `docforge` and `docforge-mcp` commands into
-> the project's `.venv`. Run them with `uv run docforge …` / `uv run docforge-mcp …` (works from
-> the project directory, nothing to activate), or activate the venv once
-> (`source .venv/bin/activate`) and drop the `uv run` prefix. The copy-paste Quickstart below
-> uses the `uv run` form; the reference listings further down show the bare `docforge` for
-> brevity — they're the same command either way.
+> **Running the commands from source:** `uv sync` installs `docforge` and `docforge-mcp` into the
+> project's `.venv`. Run them with `uv run docforge …` (works from the project directory, nothing
+> to activate), or activate the venv once (`source .venv/bin/activate`) and drop the `uv run`
+> prefix. The copy-paste Quickstart below uses the `uv run` form; the reference listings further
+> down show the bare `docforge` — that's also exactly what a PyPI install gives you.
 
 ## Quickstart
 

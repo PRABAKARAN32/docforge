@@ -1,6 +1,6 @@
 """Orchestration: wire crawl -> hash -> manifest -> diff into one change-detection run.
 
-This is the piece that makes M1 usable as a unit. The individual components stay small
+This is the piece that ties change detection together as a unit. The individual components stay small
 and single-purpose; this module just sequences them:
 
     1. crawl the URLs                     -> {url: markdown}   (crawler.py)
@@ -42,7 +42,7 @@ class ChangeDetectionResult:
     report: DiffReport
     current_hashes: dict[str, str]
     crawl_succeeded: bool
-    # url -> markdown for the pages crawled this run. The RAG sync (M2) needs the content
+    # url -> markdown for the pages crawled this run. The RAG sync needs the content
     # of new/changed pages to chunk + embed them; unchanged pages' markdown is unused.
     pages: dict[str, str]
     # Fresh HTTP validators captured this run (for changed/new pages), to store for next time.

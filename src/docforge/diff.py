@@ -1,6 +1,6 @@
 """Diffing: compare this crawl's hashes against the manifest's to find what changed.
 
-This is the culmination of M1's change detection. Given two ``{url -> content_hash}``
+The core comparison behind change detection. Given two ``{url -> content_hash}``
 maps -- ``previous`` (from the manifest, i.e. last run) and ``current`` (this crawl) --
 it sorts every URL into one of four buckets:
 

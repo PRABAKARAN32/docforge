@@ -1,4 +1,4 @@
-"""The DocForge MCP server (M4): exposes the already-built RAG as tools for an LLM client
+"""The DocForge MCP server: exposes the already-built RAG as tools for an LLM client
 (Claude Desktop, Claude Code, or a local-LLM agent runtime).
 
 This is a thin wrapper -- no new retrieval logic. ``search_docs`` reuses the same

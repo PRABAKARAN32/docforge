@@ -1,5 +1,5 @@
-"""OAuth 2.1 authorization server for docforge-mcp's http transport (M4.1: opt-in second auth
-mode, alongside the static bearer token in ``mcp_server.py``).
+"""OAuth 2.1 authorization server for docforge-mcp's http transport: an opt-in second auth
+mode, alongside the static bearer token in ``mcp_server.py``.
 
 **Why this exists.** The static bearer token (``--token``/``DOCFORGE_MCP_TOKEN``) is fine for a
 client you configure by hand -- Claude Code, Claude Desktop, LM Studio. It is *not* what

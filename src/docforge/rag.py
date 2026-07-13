@@ -1,13 +1,13 @@
 """RAG sync: turn a change-detection result into vector-store updates.
 
-This is the M2 payoff -- it connects M1's diff to the vector store, touching only what
+It connects change detection's diff to the vector store, touching only what
 changed:
 
   * pages that CHANGED or were DELETED  -> delete their old chunks (by source_url)
   * pages that are NEW or CHANGED        -> chunk -> embed -> upsert their new chunks
   * pages that are UNCHANGED             -> nothing (the whole point)
 
-Pages are processed one at a time (Notes/M2: stream, don't merge), so only a single page's
+Pages are processed one at a time (stream, don't merge), so only a single page's
 chunks are ever held in memory during embedding, and every chunk keeps its ``source_url``.
 """
 

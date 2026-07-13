@@ -103,15 +103,23 @@ uv sync                       # creates .venv, installs everything from uv.lock
 uv run playwright install chromium   # one-time: the headless browser Crawl4AI needs
 ```
 
+> **Running the commands:** `uv sync` installs the `docforge` and `docforge-mcp` commands into
+> the project's `.venv`. Run them with `uv run docforge …` / `uv run docforge-mcp …` (works from
+> the project directory, nothing to activate), or activate the venv once
+> (`source .venv/bin/activate`) and drop the `uv run` prefix. The copy-paste Quickstart below
+> uses the `uv run` form; the reference listings further down show the bare `docforge` for
+> brevity — they're the same command either way.
+
 ## Quickstart
 
 **1. Start a vector store** — pick one:
 
 ```bash
-docker compose up -d                              # A) Qdrant in Docker (persists to a volume)
-# or, no Docker at all:
-docforge sync <url> --qdrant-path ./docforge_vectors   # B) embedded, in-process
+docker compose up -d          # A) Qdrant in Docker on :6333 (persists to a named volume)
 ```
+
+Or skip Docker entirely (option B, embedded on disk — like SQLite, but for vectors): there's
+nothing to start, just add `--qdrant-path ./vectors` to the `sync`/`search` commands below.
 
 **2. Build a knowledge base:**
 

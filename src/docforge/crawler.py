@@ -84,7 +84,7 @@ async def crawl_urls_async(
     by default so we're fast but not abusive. Streaming is on, so results arrive as each page
     finishes, driving ``on_page(done, total, url)`` live even while others crawl.
 
-    Ethical defaults (see Notes/M1 on crawling ethics):
+    Ethical defaults:
       * ``respect_robots_txt=True`` — robots-disallowed URLs are reported failed and skipped.
       * an honest ``user_agent`` identifying DocForge.
 

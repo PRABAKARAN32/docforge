@@ -1,7 +1,9 @@
 """DocForge — keeps a documentation RAG in sync by updating only what changed.
 
-This package is intentionally near-empty during M0 (scaffolding). Real modules
-(crawler, hashing, manifest, diff) arrive in M1 when we build change detection.
+The top-level package holds only the version; the real work lives in focused modules:
+crawling (``crawler``), hashing (``hashing``), the manifest (``manifest``), change
+detection (``diff``/``detector``), embedding and the vector store (``embedder``/
+``vectorstore``/``rag``), the CLI (``cli``), and the MCP server (``mcp_server``).
 """
 
 __version__ = "0.1.0"

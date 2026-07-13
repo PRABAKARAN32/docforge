@@ -38,6 +38,15 @@ written anywhere; restarting the server gets a *new* one. For a token that stays
 restarts (so a client config doesn't need updating every time), set ``DOCFORGE_MCP_TOKEN``
 yourself. To run with no auth at all (open access), pass ``--no-auth`` explicitly.
 
+**A second, opt-in auth mode: OAuth 2.1**, for hosted "custom connector" clients (Claude.ai,
+ChatGPT) that don't support pasting in a static bearer token and instead speak a real OAuth
+authorization-code flow with PKCE. Setting ``--client-id``/``--client-secret`` (or
+``DOCFORGE_MCP_CLIENT_ID``/``DOCFORGE_MCP_CLIENT_SECRET``) switches http/both into this mode
+instead -- see :mod:`docforge.oauth` and GUID.md Decision 5.17 for the full design (no Dynamic
+Client Registration; a pre-registered client id/secret; in-memory-only codes/tokens, the same
+"regenerates on restart" trade-off as the static token). Mutually exclusive with
+``--token``/``--no-auth`` -- pick one auth mode per run.
+
 Run it with ``docforge-mcp`` (registered in ``pyproject.toml``).
 
 Design mirrors ``cli.py``: pure, injectable functions (``list_docs_text``,
@@ -54,10 +63,13 @@ import hmac
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from docforge.config import load_dotenv, open_store, resolve_settings, store_error_hint
 from docforge.embedder import DEFAULT_DEVICE, Embedder
 from docforge.manifest import Manifest
+from docforge.oauth import TokenStore, build_oauth_app, resolve_client_credentials
 from docforge.vectorstore import VectorStore
 
 DEFAULT_HOST = "127.0.0.1"
@@ -94,6 +106,73 @@ class BearerAuthMiddleware:
             return
 
         await self._app(scope, receive, send)
+
+
+class OAuthAuthMiddleware:
+    """Dispatches to the OAuth surface (discovery/``/authorize``/``/token``, unauthenticated by
+    design -- those *are* the auth endpoints) or the MCP app (bearer-token gated against a
+    :class:`~docforge.oauth.TokenStore`).
+
+    Unlike :class:`BearerAuthMiddleware`'s single static secret, a ``401`` here carries a
+    ``WWW-Authenticate: Bearer resource_metadata="..."`` header pointing at the protected
+    resource metadata document -- required for Claude/ChatGPT to discover where to start the
+    OAuth flow (see GUID.md Decision 5.17). That URL is resolved the same way
+    :func:`docforge.oauth.build_oauth_app`'s own endpoints resolve theirs (``public_url``
+    override, else per-request ``X-Forwarded-Proto``/``Host`` detection via
+    :func:`docforge.oauth.external_base_url`) so it stays correct behind a reverse proxy or
+    tunnel (ngrok, Cloudflare Tunnel), not just for direct ``host:port`` access.
+    """
+
+    _OAUTH_PATH_PREFIXES = ("/.well-known/", "/authorize", "/token")
+
+    def __init__(
+        self,
+        mcp_app,
+        oauth_app,
+        store: TokenStore,
+        *,
+        default_host: str,
+        public_url: str | None = None,
+    ) -> None:
+        self._mcp_app = mcp_app
+        self._oauth_app = oauth_app
+        self._store = store
+        self._default_host = default_host
+        self._public_url = public_url
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._mcp_app(scope, receive, send)
+            return
+
+        if scope["path"].startswith(self._OAUTH_PATH_PREFIXES):
+            await self._oauth_app(scope, receive, send)
+            return
+
+        headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope.get("headers") or ()}
+        presented = headers.get("authorization", "")
+        token = presented.removeprefix("Bearer ") if presented.startswith("Bearer ") else ""
+        if not token or not self._store.validate_access_token(token):
+            from starlette.responses import JSONResponse
+
+            from docforge.oauth import external_base_url
+
+            base_url = (self._public_url or "").rstrip("/") or external_base_url(
+                headers, default_scheme=scope.get("scheme", "http"), default_host=self._default_host
+            )
+            response = JSONResponse(
+                {"error": "Unauthorized"},
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": (
+                        f'Bearer resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+                    )
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        await self._mcp_app(scope, receive, send)
 
 
 def list_docs_text(db_path: str) -> str:
@@ -178,13 +257,41 @@ def build_server(
     device: str = DEFAULT_DEVICE,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    public_host: str | None = None,
 ):
     """Build the MCP server with ``list_docs``/``search_docs`` tools bound to this config.
 
     ``host``/``port`` only matter for the ``http`` transport (:func:`main`) -- ignored for
     stdio, but harmless to always set.
+
+    ``public_host`` (``netloc`` of ``--public-url``/``DOCFORGE_MCP_PUBLIC_URL``, e.g.
+    ``"abcd1234.ngrok-free.app"``) extends the MCP SDK's own DNS-rebinding ``Host``-header
+    allowlist to include it. Without this, the SDK auto-enables that protection for the default
+    loopback host and rejects *any* other ``Host`` header outright -- which silently breaks a
+    reverse-proxied/tunneled server (ngrok, Cloudflare Tunnel) even after our own auth checks
+    already passed: the SDK's check runs downstream, inside ``streamable_http_app()``. See
+    GUID.md Decision 5.17's follow-up note. ``None`` leaves the SDK's own default behavior
+    untouched (loopback-only allowlist for ``host in (127.0.0.1, localhost, ::1)``, no
+    allowlist at all otherwise -- e.g. ``--host 0.0.0.0``), so plain non-tunneled use is
+    unaffected.
     """
     from mcp.server.fastmcp import FastMCP
+
+    transport_security = None
+    if public_host:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", public_host],
+            allowed_origins=[
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+                "http://[::1]:*",
+                f"https://{public_host}",
+                f"http://{public_host}",
+            ],
+        )
 
     server = FastMCP(
         "docforge",
@@ -192,6 +299,7 @@ def build_server(
         "first if you don't already know the exact knowledge base name.",
         host=host,
         port=port,
+        transport_security=transport_security,
     )
 
     @server.tool()
@@ -257,6 +365,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run http with no authorization check at all (open access). Only the explicit "
         "opt-out for this -- by default a token is always required.",
     )
+    parser.add_argument(
+        "--client-id", default=None, metavar="CLIENT_ID",
+        help="Pre-registered OAuth client id for the http side (default: DOCFORGE_MCP_CLIENT_ID "
+        "env var, else generated fresh and printed each run). Setting this (or "
+        "--client-secret) switches http/both into a full OAuth 2.1 flow -- the mode Claude.ai/ "
+        "ChatGPT custom connectors need -- instead of the static --token. Mutually exclusive "
+        "with --token/--no-auth.",
+    )
+    parser.add_argument(
+        "--client-secret", default=None, metavar="CLIENT_SECRET",
+        help="Pre-registered OAuth client secret (default: DOCFORGE_MCP_CLIENT_SECRET env var, "
+        "else generated fresh and printed each run). Ignored unless OAuth mode is active.",
+    )
+    parser.add_argument(
+        "--public-url", default=None, metavar="URL",
+        help="Externally-reachable base URL for this server (e.g. an ngrok/Cloudflare Tunnel "
+        "URL), for when it's reached through a reverse proxy rather than directly at "
+        "--host:--port (default: DOCFORGE_MCP_PUBLIC_URL env var). Required for tunneled/"
+        "proxied setups: it's added to the MCP SDK's own Host-header allowlist (otherwise "
+        "every tunneled request is rejected before reaching this server's own auth check), "
+        "and in OAuth mode it's also used for metadata/redirects (though those alone would "
+        "auto-detect from X-Forwarded-Proto/Host without this flag).",
+    )
     return parser
 
 
@@ -280,6 +411,55 @@ async def _serve_both_async(server, host: str, port: int, token: str | None) -> 
         tg.start_soon(_serve_http_async, server, host, port, token)
 
 
+@dataclass
+class _OAuthRuntime:
+    """Bundles what the OAuth http/both serve path needs, resolved once in ``main()``."""
+
+    client_id: str
+    client_secret: str
+    store: TokenStore
+    extra_redirect_uris: frozenset[str]
+    public_url: str | None = None
+
+
+async def _serve_http_async_oauth(server, host: str, port: int, oauth: _OAuthRuntime) -> None:
+    """Serve the http side in OAuth mode: mount the discovery/authorize/token endpoints
+    alongside the MCP app, gated by :class:`OAuthAuthMiddleware` instead of the static
+    :class:`BearerAuthMiddleware`.
+
+    Metadata/redirect URLs are *not* fixed at ``http://{host}:{port}`` -- that's only the local
+    bind address, and would be wrong (typically an unreachable ``127.0.0.1``) for anyone
+    connecting through a reverse proxy or tunnel. See ``OAuthAuthMiddleware`` and
+    :func:`docforge.oauth.build_oauth_app` for the per-request/``public_url`` resolution.
+    """
+    import uvicorn
+
+    default_host = f"{host}:{port}"
+    mcp_app = server.streamable_http_app()
+    oauth_app = build_oauth_app(
+        client_id=oauth.client_id,
+        client_secret=oauth.client_secret,
+        store=oauth.store,
+        default_host=default_host,
+        public_url=oauth.public_url,
+        extra_redirect_uris=oauth.extra_redirect_uris,
+    )
+    app = OAuthAuthMiddleware(
+        mcp_app, oauth_app, oauth.store, default_host=default_host, public_url=oauth.public_url
+    )
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    await uvicorn.Server(config).serve()
+
+
+async def _serve_both_async_oauth(server, host: str, port: int, oauth: _OAuthRuntime) -> None:
+    """Run stdio and OAuth-mode http concurrently in this process."""
+    import anyio
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(server.run_stdio_async)
+        tg.start_soon(_serve_http_async_oauth, server, host, port, oauth)
+
+
 def _resolve_token(explicit: str | None, *, no_auth: bool) -> tuple[str | None, bool]:
     """Resolve the http auth token: explicit > generated > none (--no-auth).
 
@@ -297,11 +477,28 @@ def _resolve_token(explicit: str | None, *, no_auth: bool) -> tuple[str | None, 
 
 def main(argv: Sequence[str] | None = None) -> None:
     load_dotenv()  # let a local .env supply QDRANT_URL / DOCFORGE_DB / DOCFORGE_EMBED_MODEL / ...
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     settings = resolve_settings()
     transport = args.transport or os.getenv("DOCFORGE_MCP_TRANSPORT") or DEFAULT_TRANSPORT
     host = args.host or DEFAULT_HOST
     port = args.port or DEFAULT_PORT
+
+    oauth_client_id = args.client_id or os.getenv("DOCFORGE_MCP_CLIENT_ID")
+    oauth_client_secret = args.client_secret or os.getenv("DOCFORGE_MCP_CLIENT_SECRET")
+    oauth_mode = bool(oauth_client_id or oauth_client_secret)
+    token_flags_given = bool(args.token or os.getenv("DOCFORGE_MCP_TOKEN") or args.no_auth)
+    if oauth_mode and token_flags_given:
+        parser.error(
+            "--client-id/--client-secret (OAuth mode) can't be combined with "
+            "--token/--no-auth/DOCFORGE_MCP_TOKEN -- pick one auth mode."
+        )
+
+    # Resolved before build_server() -- the MCP SDK's own DNS-rebinding Host-header allowlist
+    # is fixed at server construction time, so a tunneled/reverse-proxied public host has to be
+    # known before the FastMCP() call, not just when advertising OAuth metadata later.
+    public_url = args.public_url or os.getenv("DOCFORGE_MCP_PUBLIC_URL")
+    public_host = urlparse(public_url).netloc if public_url else None
 
     server = build_server(
         db_path=settings["db_path"],
@@ -312,10 +509,75 @@ def main(argv: Sequence[str] | None = None) -> None:
         embed_model=settings["embed_model"],
         host=host,
         port=port,
+        public_host=public_host,
     )
 
     if transport == "stdio":
         server.run()  # never print here -- would corrupt the stdio JSON-RPC stream
+        return
+
+    import anyio
+
+    if oauth_mode:
+        client_id, client_secret, credentials_generated = resolve_client_credentials(
+            oauth_client_id, oauth_client_secret
+        )
+        extra_redirect_uris = frozenset(
+            uri.strip()
+            for uri in (os.getenv("DOCFORGE_MCP_REDIRECT_URIS") or "").split(",")
+            if uri.strip()
+        )
+        oauth_runtime = _OAuthRuntime(
+            client_id=client_id,
+            client_secret=client_secret,
+            store=TokenStore(),
+            extra_redirect_uris=extra_redirect_uris,
+            public_url=public_url,
+        )
+        # The URL printed below is only a best-effort hint for you to eyeball -- the actual
+        # metadata served to clients is resolved per-request (see OAuthAuthMiddleware /
+        # build_oauth_app), not fixed at startup, precisely so a reverse proxy or tunnel in
+        # front of --host:--port doesn't need this to be exactly right.
+        display_url = (public_url or f"http://{host}:{port}").rstrip("/")
+
+        # http or both: stdout is safe to use for stdio-only, but "both" also runs a stdio side
+        # in this same process -- so everything user-facing goes to stderr, never stdout, always.
+        if host not in _LOOPBACK_HOSTS:
+            print(
+                f"WARNING: binding to {host} -- anyone who can reach this port can start the "
+                "OAuth flow (though completing it still requires the client secret).",
+                file=sys.stderr,
+            )
+        print(f"DocForge MCP server (http, OAuth) listening at {display_url}/mcp", file=sys.stderr)
+        print(
+            f"Discovery: {display_url}/.well-known/oauth-authorization-server", file=sys.stderr
+        )
+        if not public_url:
+            print(
+                "Behind a reverse proxy or tunnel (ngrok, Cloudflare Tunnel)? Pass "
+                "--public-url/DOCFORGE_MCP_PUBLIC_URL -- required so the MCP SDK's own "
+                "Host-header check accepts those requests at all (metadata/redirects alone "
+                "would auto-detect the host without it, but that check won't).",
+                file=sys.stderr,
+            )
+        print(f"Client ID: {client_id}", file=sys.stderr)
+        if credentials_generated:
+            print(f"Client secret (generated fresh this run): {client_secret}", file=sys.stderr)
+            print(
+                "Neither is saved -- restarting generates new ones, and any live OAuth session "
+                "will need to reconnect. Set DOCFORGE_MCP_CLIENT_ID and "
+                "DOCFORGE_MCP_CLIENT_SECRET in .env for values that stay stable across "
+                "restarts.",
+                file=sys.stderr,
+            )
+        else:
+            print("Client secret: <as configured>", file=sys.stderr)
+        print("Ctrl+C to stop.", file=sys.stderr)
+
+        if transport == "http":
+            anyio.run(_serve_http_async_oauth, server, host, port, oauth_runtime)
+        else:
+            anyio.run(_serve_both_async_oauth, server, host, port, oauth_runtime)
         return
 
     # Only http/both ever need a token -- resolved (and possibly generated) here, not for stdio.
@@ -344,9 +606,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     else:
         print("Authorization required: Bearer <token>", file=sys.stderr)
+    if not public_url and host in _LOOPBACK_HOSTS:
+        print(
+            "Exposing this through a reverse proxy or tunnel (ngrok, Cloudflare Tunnel)? Pass "
+            "--public-url/DOCFORGE_MCP_PUBLIC_URL, or the MCP SDK's own Host-header check will "
+            "reject those requests before they reach this server's auth check.",
+            file=sys.stderr,
+        )
     print("Ctrl+C to stop.", file=sys.stderr)
-
-    import anyio
 
     if transport == "http":
         anyio.run(_serve_http_async, server, host, port, token)

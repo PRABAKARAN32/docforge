@@ -646,6 +646,7 @@ dependencies = [
     { name = "mcp" },
     { name = "qdrant-client" },
     { name = "rich-argparse" },
+    { name = "starlette" },
 ]
 
 [package.dev-dependencies]
@@ -661,6 +662,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.28.1" },
     { name = "qdrant-client", specifier = ">=1.7" },
     { name = "rich-argparse", specifier = ">=1.5" },
+    { name = "starlette", specifier = ">=0.37" },
 ]
 
 [package.metadata.requires-dev]

@@ -323,6 +323,64 @@ The pipeline splits into two halves. Ask "commodity or differentiator?" for each
   a deliberate line, revisitable if a real recurring need for it shows up (it would need to be a
   background job with a status-poll tool, not a blocking call, to do properly).
 
+### Decision 5.17 — MCP server: OAuth 2.1 as a second, opt-in auth mode
+
+- **Problem:** Decision 5.16's static bearer token works for any client configured by hand
+  (Claude Code, Claude Desktop, LM Studio), but it's not what Claude.ai's or ChatGPT's *hosted*
+  "custom connector" flows accept. Both speak OAuth 2.1: the server must expose Protected
+  Resource Metadata (RFC 9728) and Authorization Server Metadata (RFC 8414), answer a
+  `401 WWW-Authenticate` discovery handshake, run an `/authorize` consent step, and issue tokens
+  from a `/token` endpoint with PKCE. Confirmed against Claude's own connector-auth docs and
+  OpenAI's MCP connector docs before building anything — notably, Anthropic does **not** support
+  bare `client_credentials` (machine-to-machine, no user in the loop); every connection requires
+  a user consent step, even for a single-user local tool.
+- **Decision:** Add OAuth as a **second, opt-in** auth mode (`docforge/oauth.py` +
+  `OAuthAuthMiddleware` in `mcp_server.py`), selected by setting `--client-id`/`--client-secret`
+  (or the matching env vars) — the static token and `--no-auth` keep working unchanged for
+  everyone who doesn't need it. Two things deliberately **not** built:
+  - **No Dynamic Client Registration.** DCR causes a new OAuth client to be registered on every
+    fresh connection — fine for a multi-tenant SaaS, unnecessary churn for a single-user local
+    tool. Instead the client is pre-registered once: a stable Client ID + Client Secret, resolved
+    with the exact same precedence and "generated fresh, printed, not saved" semantics as the
+    static token (`resolve_client_credentials` mirrors `_resolve_token`).
+  - **No persistence.** Authorization codes, access tokens, and refresh tokens live only in a new
+    in-memory `TokenStore`, for the lifetime of one server process. Restarting `docforge-mcp`
+    invalidates any live OAuth session (the client gets a `401` and reconnects) — the same
+    trade-off Decision 5.16 already accepted for the static token, applied consistently rather
+    than quietly building a durable store (which would need its own SQLite table, mirroring
+    `Manifest`'s pattern — left as a future enhancement if this proves to matter in practice).
+  - **Consent, not silent auto-approval.** `/authorize` renders a minimal one-click HTML page
+    rather than immediately redirecting with a code — no login system needed (there's exactly one
+    user, the person running the process), but an explicit click stays required, consistent with
+    "security defaults should be secure without effort" (§10 item 11) rather than trusting that
+    every caller who reaches the endpoint is legitimate.
+  - **Redirect URIs are allowlisted, not freeform**: the fixed hosted callbacks
+    (`https://claude.ai/api/mcp/auth_callback`, `https://chatgpt.com/connector_platform_oauth_redirect`
+    and its legacy aliases), any loopback address on any port (RFC 8252 §7.3, for native clients
+    like Claude Code), plus an optional `DOCFORGE_MCP_REDIRECT_URIS` for anything else. Accepting
+    an arbitrary caller-supplied `redirect_uri` would let a malicious `/authorize` link redirect a
+    freshly issued code anywhere.
+  - Tokens are opaque `secrets.token_urlsafe` strings in the `TokenStore` dict, not JWTs — even
+    though PyJWT/`cryptography` are already present transitively (via `mcp`'s own OAuth support),
+    they'd add no value here since revocation is a dict operation either way. Consistent with
+    "don't reinvent commodities, don't over-build differentiators" (§10 item 2) in the direction
+    of *not* adding a dependency for something this small.
+- **Trade-off:** A real mini authorization-server is a meaningfully bigger surface than a single
+  compared string — more code, more RFCs to get right, more to test. Justified only because a
+  hosted connector genuinely requires it; local/LAN users should keep using the static token.
+- **Follow-up bug, found via real use:** the first version fixed `issuer`/`resource` URLs in
+  OAuth metadata to `http://{--host}:{--port}` at startup. That's correct for direct local/LAN
+  access but wrong the moment the server sits behind ngrok/Cloudflare Tunnel/a reverse proxy
+  (the realistic way to expose a local server to Claude.ai's hosted backend at all) — clients
+  were handed a `127.0.0.1` authorization endpoint they could never reach. Fixed by resolving
+  the advertised base URL **per request** from `X-Forwarded-Proto`/`Host` (which tunnels already
+  send), with `--public-url`/`DOCFORGE_MCP_PUBLIC_URL` as an explicit override for proxies that
+  don't forward those headers. Trusting these headers only changes what URL the server *tells
+  the client to use next* — it grants no additional access on its own, so this doesn't weaken
+  the actual authorization checks (bearer token / client-secret comparisons are unaffected).
+  Verified live with a simulated tunnel request (`X-Forwarded-Proto: https` +
+  `Host: fake-tunnel.ngrok-free.app`), not just asserted in tests.
+
 ---
 
 ## 6. Licensing
@@ -364,7 +422,7 @@ projects in one trench coat, none finished).
 | **M1** | Change detection: crawl → normalize → hash → SQLite manifest → diff report (new/changed/deleted). No RAG yet, independently testable and already useful. | **Done** |
 | **M2** | RAG sync: chunk → embed (local model) → upsert to vector DB → delete stale, wired to M1's diff. Pluggable embedder + store. | **Done** |
 | **M3** | One-command CLI: `docforge sync/diff/status/search/remove`, idempotent, `.env` config, live progress. | **Done** |
-| **M4** | MCP server — expose DocForge as MCP tools (`list_docs`, `search_docs`) so any MCP-capable LLM client can use it; stdio + HTTP transports, secure-by-default auth. | **Done** |
+| **M4** | MCP server — expose DocForge as MCP tools (`list_docs`, `search_docs`) so any MCP-capable LLM client can use it; stdio + HTTP transports, secure-by-default auth (static token, plus opt-in OAuth 2.1 for hosted connectors — Decision 5.17). | **Done** |
 | **M5** | Docker + run-as-service for a clean, no-manual-setup user experience. | **Next** |
 
 Full detail on what shipped in each milestone: [`Docs/ROADMAP.md`](Docs/ROADMAP.md). Command
@@ -429,5 +487,5 @@ These are the habits that separate an experienced SDE from a newbie. They apply 
 
 ---
 
-_Last updated: after M4 (MCP server) — see §7 for full milestone status. Update this file
-whenever a decision changes or a milestone completes._
+_Last updated: after M4.1 (MCP server OAuth mode, Decision 5.17) — see §7 for full milestone
+status. Update this file whenever a decision changes or a milestone completes._

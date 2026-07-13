@@ -486,3 +486,280 @@ def test_bearer_auth_passes_through_non_http_scopes() -> None:
     asyncio.run(BearerAuthMiddleware(app, "secret")({"type": "lifespan"}, None, None))
 
     assert called == [True]
+
+
+# --- CLI parser (--client-id/--client-secret) ---
+
+
+def test_parser_accepts_client_id_and_secret() -> None:
+    args = _build_parser().parse_args(["--client-id", "cid", "--client-secret", "csecret"])
+    assert args.client_id == "cid"
+    assert args.client_secret == "csecret"
+
+
+def test_parser_defaults_client_id_and_secret_to_none() -> None:
+    args = _build_parser().parse_args([])
+    assert args.client_id is None
+    assert args.client_secret is None
+
+
+def test_main_rejects_oauth_and_token_flags_combined(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+
+    with pytest.raises(SystemExit):
+        mcp_server_module.main(
+            ["--transport", "http", "--client-id", "cid", "--token", "secret"]
+        )
+
+
+def test_main_rejects_oauth_and_no_auth_combined(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+
+    with pytest.raises(SystemExit):
+        mcp_server_module.main(["--transport", "http", "--client-id", "cid", "--no-auth"])
+
+
+# --- main() OAuth dispatch ---
+
+
+def test_main_http_oauth_mode_generates_and_prints_credentials(tmp_path, monkeypatch, capsys) -> None:
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DOCFORGE_MCP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DOCFORGE_MCP_CLIENT_SECRET", raising=False)
+    calls: list[tuple] = []
+
+    async def fake_serve_http_oauth(server, host, port, oauth):
+        calls.append((host, port, oauth))
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_http_async_oauth", fake_serve_http_oauth)
+
+    mcp_server_module.main(["--transport", "http", "--port", "9001", "--client-id", "my-client"])
+
+    assert len(calls) == 1
+    host, port, oauth = calls[0]
+    assert (host, port) == ("127.0.0.1", 9001)
+    assert oauth.client_id == "my-client"
+    assert len(oauth.client_secret) > 20  # generated, since only --client-id was given
+
+    err = capsys.readouterr().err
+    assert "Client ID: my-client" in err
+    assert "generated fresh this run" in err
+    assert oauth.client_secret in err
+    assert "/.well-known/oauth-authorization-server" in err
+
+
+def test_main_http_oauth_mode_with_explicit_secret_skips_generation_message(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+
+    async def fake_serve_http_oauth(server, host, port, oauth):
+        pass
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_http_async_oauth", fake_serve_http_oauth)
+
+    mcp_server_module.main(
+        ["--transport", "http", "--client-id", "cid", "--client-secret", "csecret"]
+    )
+
+    err = capsys.readouterr().err
+    assert "generated fresh this run" not in err
+    assert "Client secret: <as configured>" in err
+
+
+def test_main_both_oauth_dispatches_to_serve_both_async_oauth(tmp_path, monkeypatch) -> None:
+    import docforge.mcp_server as mcp_server_module
+
+    monkeypatch.chdir(tmp_path)
+    calls: list[tuple] = []
+
+    async def fake_serve_both_oauth(server, host, port, oauth):
+        calls.append((host, port, oauth))
+
+    monkeypatch.setattr(mcp_server_module, "build_server", lambda **kw: object())
+    monkeypatch.setattr(mcp_server_module, "_serve_both_async_oauth", fake_serve_both_oauth)
+
+    mcp_server_module.main(["--transport", "both", "--client-id", "cid", "--client-secret", "cs"])
+
+    assert len(calls) == 1
+    assert calls[0][0:2] == ("127.0.0.1", 8000)
+
+
+# --- OAuthAuthMiddleware (raw ASGI, no starlette test client needed) ---
+
+
+def _oauth_http_scope(path: str, auth_header: str | None) -> dict:
+    headers = [(b"authorization", auth_header.encode())] if auth_header is not None else []
+    return {"type": "http", "path": path, "headers": headers}
+
+
+def test_oauth_auth_middleware_dispatches_well_known_paths_unauthenticated() -> None:
+    from docforge.mcp_server import OAuthAuthMiddleware
+    from docforge.oauth import TokenStore
+
+    oauth_called, mcp_called = [], []
+
+    async def oauth_app(scope, receive, send):
+        oauth_called.append(True)
+
+    async def mcp_app(scope, receive, send):
+        mcp_called.append(True)
+
+    middleware = OAuthAuthMiddleware(mcp_app, oauth_app, TokenStore(), default_host="x")
+    asyncio.run(
+        middleware(
+            _oauth_http_scope("/.well-known/oauth-authorization-server", None), None, None
+        )
+    )
+
+    assert oauth_called == [True]
+    assert mcp_called == []
+
+
+def test_oauth_auth_middleware_rejects_missing_token_with_www_authenticate_header() -> None:
+    from docforge.mcp_server import OAuthAuthMiddleware
+    from docforge.oauth import TokenStore
+
+    async def oauth_app(scope, receive, send):
+        raise AssertionError("oauth app must not run for /mcp")
+
+    async def mcp_app(scope, receive, send):
+        raise AssertionError("mcp app must not run when unauthorized")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    middleware = OAuthAuthMiddleware(mcp_app, oauth_app, TokenStore(), default_host="x")
+    asyncio.run(middleware(_oauth_http_scope("/mcp", None), None, send))
+
+    assert sent[0]["status"] == 401
+    headers = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
+    assert 'resource_metadata="http://x/.well-known/oauth-protected-resource"' in headers[
+        "www-authenticate"
+    ]
+
+
+def test_oauth_auth_middleware_www_authenticate_honors_forwarded_headers() -> None:
+    """Regression guard: behind a reverse proxy/tunnel (ngrok, Cloudflare Tunnel), the
+    advertised resource_metadata URL must reflect the public host the client actually used,
+    not the local bind address -- otherwise a client on a different machine gets a metadata
+    URL pointing at its own 127.0.0.1, which it can never reach."""
+    from docforge.mcp_server import OAuthAuthMiddleware
+    from docforge.oauth import TokenStore
+
+    async def oauth_app(scope, receive, send):
+        raise AssertionError("oauth app must not run for /mcp")
+
+    async def mcp_app(scope, receive, send):
+        raise AssertionError("mcp app must not run when unauthorized")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "path": "/mcp",
+        "headers": [
+            (b"x-forwarded-proto", b"https"),
+            (b"host", b"my-tunnel.ngrok-free.app"),
+        ],
+    }
+    middleware = OAuthAuthMiddleware(mcp_app, oauth_app, TokenStore(), default_host="127.0.0.1:8000")
+    asyncio.run(middleware(scope, None, send))
+
+    headers = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
+    assert (
+        'resource_metadata="https://my-tunnel.ngrok-free.app/.well-known/oauth-protected-resource"'
+        in headers["www-authenticate"]
+    )
+
+
+def test_oauth_auth_middleware_public_url_override_wins_over_forwarded_headers() -> None:
+    from docforge.mcp_server import OAuthAuthMiddleware
+    from docforge.oauth import TokenStore
+
+    async def oauth_app(scope, receive, send):
+        raise AssertionError("oauth app must not run for /mcp")
+
+    async def mcp_app(scope, receive, send):
+        raise AssertionError("mcp app must not run when unauthorized")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "path": "/mcp",
+        "headers": [(b"host", b"whatever-the-client-sent.example.com")],
+    }
+    middleware = OAuthAuthMiddleware(
+        mcp_app, oauth_app, TokenStore(),
+        default_host="127.0.0.1:8000", public_url="https://configured.example.com",
+    )
+    asyncio.run(middleware(scope, None, send))
+
+    headers = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
+    assert (
+        'resource_metadata="https://configured.example.com/.well-known/oauth-protected-resource"'
+        in headers["www-authenticate"]
+    )
+
+
+def test_oauth_auth_middleware_allows_a_valid_access_token() -> None:
+    from docforge.mcp_server import OAuthAuthMiddleware
+    from docforge.oauth import TokenStore
+
+    store = TokenStore()
+    access_token, _refresh_token = store.issue_tokens("docforge")
+    mcp_called = []
+
+    async def oauth_app(scope, receive, send):
+        raise AssertionError("oauth app must not run for /mcp")
+
+    async def mcp_app(scope, receive, send):
+        mcp_called.append(True)
+
+    middleware = OAuthAuthMiddleware(mcp_app, oauth_app, store, default_host="x")
+    asyncio.run(middleware(_oauth_http_scope("/mcp", f"Bearer {access_token}"), None, None))
+
+    assert mcp_called == [True]
+
+
+def test_oauth_auth_middleware_passes_through_non_http_scopes() -> None:
+    from docforge.mcp_server import OAuthAuthMiddleware
+    from docforge.oauth import TokenStore
+
+    mcp_called = []
+
+    async def oauth_app(scope, receive, send):
+        raise AssertionError("oauth app must not run for lifespan scopes")
+
+    async def mcp_app(scope, receive, send):
+        mcp_called.append(True)
+
+    middleware = OAuthAuthMiddleware(mcp_app, oauth_app, TokenStore(), default_host="x")
+    asyncio.run(middleware({"type": "lifespan"}, None, None))
+
+    assert mcp_called == [True]

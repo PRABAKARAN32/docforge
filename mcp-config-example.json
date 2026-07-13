@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "docforge": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/home/legend/OpenSorce/DocForge",
+        "docforge-mcp"
+      ]
+    },
+    "docforge-http-oauth": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "auth": {
+        "CLIENT_ID": "my-docforge",
+        "CLIENT_SECRET": "B9jJ0Dmfrs1L3CXSJliHmwBDADj0e7jlBoFFgFMrero"
+      }
+    }
+  }
+}

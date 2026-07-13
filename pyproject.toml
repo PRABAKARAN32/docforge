@@ -12,6 +12,7 @@ dependencies = [
     "mcp>=1.28.1", # M4: MCP server (stdio) exposing search_docs/list_docs to LLM clients
     "qdrant-client>=1.7", # M2: client for the Qdrant vector store
     "rich-argparse>=1.5", # colorful --help (rich is already a transitive dep)
+    "starlette>=0.37", # M4.1: OAuth 2.1 endpoints for the http transport (already a transitive dep of mcp; now used directly)
 ]
 
 # Dev-only tools (PEP 735). Not published to PyPI; installed by default via `uv sync`.
